@@ -78,7 +78,8 @@ class MainActivity : AppCompatActivity() {
     private val allLands: StateFlow<List<Land>> = _allLands.asStateFlow()
 
     private var playerLocation: LatLng? = null
-    private var boostTimerJob: Job? = null
+    private var incomeBoostTimerJob: Job? = null // Renamed
+    private var rangeBoostTimerJob: Job? = null // NEW: Range boost timer job
 
     private val locationRequest = LocationEngineRequest.Builder(1000L)
         .setPriority(LocationEngineRequest.PRIORITY_HIGH_ACCURACY).build()
@@ -101,7 +102,8 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val STARTING_BALANCE = 50.0
-        private const val PLAYER_RANGE_METERS = 400.0
+        private const val BASE_PLAYER_RANGE_METERS = 400.0 // Changed constant name to BASE
+        private const val RANGE_MULTIPLIER = 1.67 // NEW: 67% increase (1.0 + 0.67)
         private const val LAND_COST = 50.0
         private const val LAND_PPS = 0.0000000011
         private const val ALL_LANDS_SOURCE_ID = "all-lands-source"
@@ -241,6 +243,7 @@ class MainActivity : AppCompatActivity() {
                     batch.update(db.collection("users").document(userId), "balance", FieldValue.increment(-amount))
                 }.await()
 
+                // FIX: Changed Toast.LONG_LENGTH to Toast.LENGTH_LONG
                 Toast.makeText(this@MainActivity, "Redemption request sent! Pug will review it.", Toast.LENGTH_LONG).show()
 
             } catch (e: Exception) {
@@ -337,7 +340,9 @@ class MainActivity : AppCompatActivity() {
             userDocRef.addSnapshotListener { snapshot, _ ->
                 snapshot?.toObject<User>()?.let { updatedUser ->
                     _userState.value = updatedUser
-                    updateBoostTimerUI(updatedUser.boostEndTime)
+                    // Updated to pass both boost times and ensure the range circle is updated
+                    updateBoostTimerUI(updatedUser.boostEndTime, updatedUser.rangeBoostEndTime)
+                    updatePlayerRangeLayer()
                 }
             }
 
@@ -363,13 +368,25 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateBoostTimerUI(boostEndTime: Date?) {
-        boostTimerJob?.cancel()
-        if (boostEndTime != null && boostEndTime.after(Date())) {
+    private fun getCurrentRangeMeters(): Double { // NEW: Function to calculate dynamic range
+        val rangeBoostEndTime = _userState.value?.rangeBoostEndTime
+        val isBoostActive = rangeBoostEndTime != null && rangeBoostEndTime.after(Date())
+        return if (isBoostActive) {
+            BASE_PLAYER_RANGE_METERS * RANGE_MULTIPLIER
+        } else {
+            BASE_PLAYER_RANGE_METERS
+        }
+    }
+
+    // Updated to take both boost end times
+    private fun updateBoostTimerUI(incomeBoostEndTime: Date?, rangeBoostEndTime: Date?) {
+        // Handle Income Boost Timer
+        incomeBoostTimerJob?.cancel()
+        if (incomeBoostEndTime != null && incomeBoostEndTime.after(Date())) {
             binding.boostTimerTextView.isVisible = true
-            boostTimerJob = lifecycleScope.launch {
+            incomeBoostTimerJob = lifecycleScope.launch {
                 while(true) {
-                    val remainingTime = boostEndTime.time - System.currentTimeMillis()
+                    val remainingTime = incomeBoostEndTime.time - System.currentTimeMillis()
                     if (remainingTime <= 0) {
                         binding.boostTimerTextView.isVisible = false
                         break
@@ -382,6 +399,30 @@ class MainActivity : AppCompatActivity() {
             }
         } else {
             binding.boostTimerTextView.isVisible = false
+        }
+
+        // NEW: Handle Range Boost Timer
+        binding.rangeBoostTimerTextView.let { rangeTimer ->
+            rangeBoostTimerJob?.cancel()
+            if (rangeBoostEndTime != null && rangeBoostEndTime.after(Date())) {
+                rangeTimer.isVisible = true
+                rangeBoostTimerJob = lifecycleScope.launch {
+                    while(true) {
+                        val remainingTime = rangeBoostEndTime.time - System.currentTimeMillis()
+                        if (remainingTime <= 0) {
+                            rangeTimer.isVisible = false
+                            updatePlayerRangeLayer() // Update map to shrink circle
+                            break
+                        }
+                        val minutes = TimeUnit.MILLISECONDS.toMinutes(remainingTime)
+                        val seconds = TimeUnit.MILLISECONDS.toSeconds(remainingTime) % 60
+                        rangeTimer.text = String.format("🛰️ Range: %02d:%02d", minutes, seconds)
+                        delay(1000)
+                    }
+                }
+            } else {
+                rangeTimer.isVisible = false
+            }
         }
     }
 
@@ -603,8 +644,12 @@ class MainActivity : AppCompatActivity() {
     private fun updatePlayerRangeLayer() {
         val location = playerLocation ?: return
         if (!::maplibreMap.isInitialized) return
+
+        // Get the current player range (boosted or base)
+        val currentRange = getCurrentRangeMeters()
+
         maplibreMap.style?.getSourceAs<GeoJsonSource>(PLAYER_RANGE_SOURCE_ID)?.let { source ->
-            source.setGeoJson(createCirclePolygon(location, PLAYER_RANGE_METERS))
+            source.setGeoJson(createCirclePolygon(location, currentRange)) // Use the dynamic range
         }
     }
 
@@ -622,7 +667,8 @@ class MainActivity : AppCompatActivity() {
             }
 
             val distance = GridUtils.distanceInMeters(playerLoc, latLng)
-            if (distance > PLAYER_RANGE_METERS) {
+            // Use the dynamic range from the new function
+            if (distance > getCurrentRangeMeters()) {
                 Toast.makeText(this, "This land is out of your range!", Toast.LENGTH_SHORT).show()
                 return@addOnMapClickListener true
             }
@@ -703,6 +749,8 @@ class MainActivity : AppCompatActivity() {
                 val nearbyUnownedPlots = mutableListOf<Pair<Int, Int>>()
                 val (centerGx, centerGy) = GridUtils.latLonToGrid(centerLocation)
 
+                val currentRange = getCurrentRangeMeters() // Use the dynamic range
+
                 var searchRadius = 0
                 while (nearbyUnownedPlots.size < amountToClaim && searchRadius < 50) { // Safety break
                     for (dx in -searchRadius..searchRadius) {
@@ -718,7 +766,8 @@ class MainActivity : AppCompatActivity() {
                             }
 
                             val plotCenterLatLng = GridUtils.gridToLatLon(gx + 0.5, gy + 0.5)
-                            if (GridUtils.distanceInMeters(centerLocation, plotCenterLatLng) <= PLAYER_RANGE_METERS) {
+                            // Use the dynamic range check
+                            if (GridUtils.distanceInMeters(centerLocation, plotCenterLatLng) <= currentRange) {
                                 nearbyUnownedPlots.add(plotCoords)
                                 if (nearbyUnownedPlots.size >= amountToClaim) break
                             }
@@ -831,7 +880,8 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         binding.mapView.onStop()
-        boostTimerJob?.cancel()
+        incomeBoostTimerJob?.cancel() // Renamed variable
+        rangeBoostTimerJob?.cancel() // NEW: Cancel range timer
         saveUserProgress()
     }
 

@@ -14,5 +14,6 @@ data class User(
     val balance: Double = 0.0,
     val landVouchers: Int = 0,
     @ServerTimestamp val lastSeen: Date? = null,
-    val boostEndTime: Date? = null // Tracks when the 20x boost expires
+    val boostEndTime: Date? = null, // Tracks when the 20x income boost expires
+    val rangeBoostEndTime: Date? = null // NEW: Tracks when the range boost expires
 )
