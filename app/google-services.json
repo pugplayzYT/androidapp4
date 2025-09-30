@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "668750016903",
+    "project_id": "puglands",
+    "storage_bucket": "puglands.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:668750016903:android:ab45bf1a32b93a0a1b6322",
+        "android_client_info": {
+          "package_name": "com.puglands.game"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC40M_wnoi2weIRLZgA-Za8veEQh06kjUE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
