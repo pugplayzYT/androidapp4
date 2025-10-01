@@ -5,22 +5,17 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
-import com.google.firebase.auth.ktx.auth
-import com.google.firebase.firestore.ktx.firestore
-import com.google.firebase.firestore.ktx.toObjects
-import com.google.firebase.ktx.Firebase
+import com.puglands.game.api.ApiClient
 import com.puglands.game.data.database.Land
 import com.puglands.game.databinding.ActivityPlotsBinding
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import java.util.*
 import kotlin.math.max
 
 class PlotsActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityPlotsBinding
-    private val db = Firebase.firestore
-    private val auth = Firebase.auth
+    // Firebase components removed
     private lateinit var plotAdapter: PlotAdapter
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,12 +35,13 @@ class PlotsActivity : AppCompatActivity() {
 
     private fun loadPlotsData() {
         lifecycleScope.launch {
-            val userId = auth.currentUser?.uid ?: return@launch
+            val userId = ApiClient.currentAuthUser?.uid ?: run {
+                binding.totalIncomeTextView.text = "Error: Not logged in."
+                return@launch
+            }
             try {
-                // NEW: Query the top-level 'lands' collection for the current user's plots
-                val lands = db.collection("lands")
-                    .whereEqualTo("ownerId", userId)
-                    .get().await().toObjects<Land>()
+                // API Call to Flask server to get user's lands
+                val lands = ApiClient.getUserLands(userId)
 
                 plotAdapter.submitList(lands)
 
@@ -53,14 +49,14 @@ class PlotsActivity : AppCompatActivity() {
                 val formattedTotal = formatCurrency(totalPPS)
                 binding.totalIncomeTextView.text = "Total Income:\n$formattedTotal Pugbucks/sec"
             } catch (e: Exception) {
-                binding.totalIncomeTextView.text = "Could not load plot data."
+                binding.totalIncomeTextView.text = "Could not load plot data: ${e.message}"
             }
         }
     }
 
     private fun showPlotInfoDialog(land: Land) {
         val formattedPPS = formatCurrency(land.pps)
-        val userName = auth.currentUser?.displayName ?: "Unknown"
+        val userName = ApiClient.currentAuthUser?.name ?: "Unknown"
 
         val detailedMessage = "Owner: $userName\n" +
                 "Grid: (${land.gx}, ${land.gy})\n" +

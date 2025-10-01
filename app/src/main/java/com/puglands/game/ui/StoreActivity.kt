@@ -10,44 +10,33 @@ import com.google.android.gms.ads.MobileAds
 import com.google.android.gms.ads.admanager.AdManagerAdRequest
 import com.google.android.gms.ads.rewarded.RewardedAd
 import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback
-import com.google.firebase.auth.ktx.auth
-import com.google.firebase.firestore.FieldValue
-import com.google.firebase.firestore.ktx.firestore
-import com.google.firebase.firestore.ktx.toObject
-import com.google.firebase.ktx.Firebase
+import com.puglands.game.R
+import com.puglands.game.api.ApiClient
 import com.puglands.game.data.database.User
 import com.puglands.game.databinding.ActivityStoreBinding
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.ParseException
+import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
 import java.util.concurrent.TimeUnit
-
-// NOTE: To use Google's Test Ads without an AdMob account, you MUST add the
-// test Application ID to your AndroidManifest.xml file inside the <application> tag:
-//
-// <meta-data
-//      android:name="com.google.android.gms.ads.APPLICATION_ID"
-//      android:value="ca-app-pub-3940256099942544~3347511713"/>
-//
-// You also need to add this dependency to your app's build.gradle file:
-// implementation 'com.google.android.gms:play-services-ads:23.1.0'
 
 class StoreActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityStoreBinding
-    private val db = Firebase.firestore
-    private val auth = Firebase.auth
+    // Firebase components removed
     private var user: User? = null
 
     // Ads variables
     private var voucherRewardedAd: RewardedAd? = null
     private var boostRewardedAd: RewardedAd? = null
-    private var rangeRewardedAd: RewardedAd? = null // NEW: Range Boost Ad declaration
+    private var rangeRewardedAd: RewardedAd? = null
     private val adUnitId = "ca-app-pub-3940256099942544/5224354917"
 
-    private var incomeTimerJob: Job? = null // Renamed
-    private var rangeTimerJob: Job? = null // NEW: Separate job for range boost timer
+    private var incomeTimerJob: Job? = null
+    private var rangeTimerJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,32 +47,51 @@ class StoreActivity : AppCompatActivity() {
 
         loadVoucherRewardedAd()
         loadBoostRewardedAd()
-        loadRangeRewardedAd() // NEW: Load the new ad
+        loadRangeRewardedAd()
+
         loadUserData()
 
         binding.watchAdButton.setOnClickListener { showVoucherRewardedAd() }
         binding.watchBoostAdButton.setOnClickListener { showBoostRewardedAd() }
-        binding.watchRangeBoostAdButton.setOnClickListener { showRangeRewardedAd() } // NEW: Set listener
+        binding.watchRangeBoostAdButton.setOnClickListener { showRangeRewardedAd() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-load data when activity resumes to get latest state
+        loadUserData()
     }
 
     override fun onStop() {
         super.onStop()
-        incomeTimerJob?.cancel() // Changed from timerJob
-        rangeTimerJob?.cancel() // NEW: Cancel range timer
+        incomeTimerJob?.cancel()
+        rangeTimerJob?.cancel()
     }
 
+    // Helper to convert ISO String timestamp to Date object
+    private fun isoDateToDate(isoString: String?): Date? {
+        if (isoString == null) return null
+        return try {
+            // Flask server uses UTC with Z or +00:00. This handles ISO 8601.
+            SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSSSSZZZZZ", Locale.US).parse(isoString.replace("Z", "+00:00"))
+        } catch (e: ParseException) {
+            null
+        }
+    }
+
+
     private fun loadUserData() {
-        val userId = auth.currentUser?.uid ?: return
-        db.collection("users").document(userId)
-            .addSnapshotListener { snapshot, error ->
-                if (error != null) {
-                    Toast.makeText(this, "Failed to load user data.", Toast.LENGTH_SHORT).show()
-                    return@addSnapshotListener
-                }
-                user = snapshot?.toObject<User>()
+        val userId = ApiClient.currentAuthUser?.uid ?: return
+        lifecycleScope.launch {
+            try {
+                // API Call to Flask server to get user data
+                user = ApiClient.getUser(userId)
                 updateUI()
-                startBoostTimers() // Renamed call
+                startBoostTimers()
+            } catch (e: Exception) {
+                Toast.makeText(this@StoreActivity, "Failed to load user data: ${e.message}", Toast.LENGTH_SHORT).show()
             }
+        }
     }
 
     private fun updateUI() {
@@ -92,23 +100,21 @@ class StoreActivity : AppCompatActivity() {
         }
         binding.watchAdButton.isEnabled = voucherRewardedAd != null
         binding.watchBoostAdButton.isEnabled = boostRewardedAd != null
-        binding.watchRangeBoostAdButton.isEnabled = rangeRewardedAd != null // NEW: Update button state
+        binding.watchRangeBoostAdButton.isEnabled = rangeRewardedAd != null
     }
 
-    // Renamed and updated to handle both timers
     private fun startBoostTimers() {
         // Income Boost Timer
         incomeTimerJob?.cancel()
-        val boostEndTime = user?.boostEndTime?.time ?: 0
+        val boostEndTime = isoDateToDate(user?.boostEndTime)?.time ?: 0
         updateTimer(boostEndTime, binding.boostTimerTextView) { incomeTimerJob = it }
 
-        // Range Boost Timer (NEW)
+        // Range Boost Timer
         rangeTimerJob?.cancel()
-        val rangeBoostEndTime = user?.rangeBoostEndTime?.time ?: 0
+        val rangeBoostEndTime = isoDateToDate(user?.rangeBoostEndTime)?.time ?: 0
         updateTimer(rangeBoostEndTime, binding.rangeBoostTimerTextView) { rangeTimerJob = it }
     }
 
-    // NEW: Helper function to manage timers
     private fun updateTimer(endTime: Long, textView: View, jobSetter: (Job?) -> Unit) {
         if (endTime > System.currentTimeMillis()) {
             textView.visibility = View.VISIBLE
@@ -117,12 +123,14 @@ class StoreActivity : AppCompatActivity() {
                     val remainingTime = endTime - System.currentTimeMillis()
                     if (remainingTime <= 0) {
                         textView.visibility = View.GONE
+                        // Re-load user data to update the local 'user' object and sync the state
+                        loadUserData()
                         break
                     }
                     val minutes = TimeUnit.MILLISECONDS.toMinutes(remainingTime)
                     val seconds = TimeUnit.MILLISECONDS.toSeconds(remainingTime) % 60
                     // Check the view ID to determine the text format
-                    val prefix = if (textView.id == com.puglands.game.R.id.boostTimerTextView) "Boost" else "Range Boost"
+                    val prefix = if (textView.id == R.id.boostTimerTextView) "Boost" else "Range Boost"
                     (textView as android.widget.TextView).text = String.format("%s active: %02d:%02d", prefix, minutes, seconds)
                     delay(1000)
                 }
@@ -151,7 +159,6 @@ class StoreActivity : AppCompatActivity() {
 
     private fun showVoucherRewardedAd() {
         voucherRewardedAd?.let { ad ->
-            // FIX: Explicitly ignore the rewardItem parameter to resolve inference error
             ad.show(this) { _ -> grantVoucher() }
             voucherRewardedAd = null
             loadVoucherRewardedAd()
@@ -162,12 +169,17 @@ class StoreActivity : AppCompatActivity() {
     }
 
     private fun grantVoucher() {
-        val userId = auth.currentUser?.uid ?: return
-        db.collection("users").document(userId)
-            .update("landVouchers", FieldValue.increment(1))
-            .addOnSuccessListener {
-                Toast.makeText(this, "🎉 You earned 1 Land Voucher! 🎉", Toast.LENGTH_LONG).show()
+        lifecycleScope.launch {
+            try {
+                // API Call to Flask server to grant voucher
+                val updatedUser = ApiClient.grantVoucher()
+                user = updatedUser // Update local state
+                updateUI()
+                Toast.makeText(this@StoreActivity, "🎉 You earned 1 Land Voucher! 🎉", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@StoreActivity, "Grant failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
+        }
     }
 
     // --- Boost Ad Logic ---
@@ -188,7 +200,6 @@ class StoreActivity : AppCompatActivity() {
 
     private fun showBoostRewardedAd() {
         boostRewardedAd?.let { ad ->
-            // FIX: Explicitly ignore the rewardItem parameter to resolve inference error
             ad.show(this) { _ -> grantBoost() }
             boostRewardedAd = null
             loadBoostRewardedAd()
@@ -199,18 +210,20 @@ class StoreActivity : AppCompatActivity() {
     }
 
     private fun grantBoost() {
-        val userId = auth.currentUser?.uid ?: return
-        val boostDurationMillis = 10 * 60 * 1000L
-        val newBoostEndTime = Date(System.currentTimeMillis() + boostDurationMillis)
-
-        db.collection("users").document(userId)
-            .update("boostEndTime", newBoostEndTime)
-            .addOnSuccessListener {
-                Toast.makeText(this, "🚀 20x Boost Activated for 10 minutes! 🚀", Toast.LENGTH_LONG).show()
+        lifecycleScope.launch {
+            try {
+                // API Call to Flask server to grant income boost
+                val updatedUser = ApiClient.grantBoost()
+                user = updatedUser // Update local state
+                startBoostTimers() // Restart timer with new end time
+                Toast.makeText(this@StoreActivity, "🚀 20x Boost Activated for 10 minutes! 🚀", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@StoreActivity, "Grant failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
+        }
     }
 
-    // --- NEW: Range Boost Ad Logic ---
+    // --- Range Boost Ad Logic ---
     private fun loadRangeRewardedAd() {
         binding.watchRangeBoostAdButton.isEnabled = false
         val adRequest = AdManagerAdRequest.Builder().build()
@@ -227,7 +240,6 @@ class StoreActivity : AppCompatActivity() {
 
     private fun showRangeRewardedAd() {
         rangeRewardedAd?.let { ad ->
-            // FIX: Explicitly ignore the rewardItem parameter to resolve inference error
             ad.show(this) { _ -> grantRangeBoost() }
             rangeRewardedAd = null
             loadRangeRewardedAd()
@@ -238,14 +250,16 @@ class StoreActivity : AppCompatActivity() {
     }
 
     private fun grantRangeBoost() {
-        val userId = auth.currentUser?.uid ?: return
-        val boostDurationMillis = 5 * 60 * 1000L // 5 minutes
-        val newBoostEndTime = Date(System.currentTimeMillis() + boostDurationMillis)
-
-        db.collection("users").document(userId)
-            .update("rangeBoostEndTime", newBoostEndTime)
-            .addOnSuccessListener {
-                Toast.makeText(this, "🛰️ 67% Range Boost Activated for 5 minutes! 🛰️", Toast.LENGTH_LONG).show()
+        lifecycleScope.launch {
+            try {
+                // API Call to Flask server to grant range boost
+                val updatedUser = ApiClient.grantRangeBoost()
+                user = updatedUser // Update local state
+                startBoostTimers() // Restart range timer with new end time
+                Toast.makeText(this@StoreActivity, "🛰️ 67% Range Boost Activated for 5 minutes! 🛰️", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@StoreActivity, "Grant failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
+        }
     }
 }

@@ -2,6 +2,7 @@ package com.puglands.game.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -17,13 +18,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.ktx.auth
-import com.google.firebase.firestore.FieldValue
-import com.google.firebase.firestore.ktx.firestore
-import com.google.firebase.firestore.ktx.toObject
-import com.google.firebase.ktx.Firebase
 import com.puglands.game.R
+import com.puglands.game.api.ApiClient
+import com.puglands.game.data.database.AuthUser
 import com.puglands.game.data.database.Land
 import com.puglands.game.data.database.User
 import com.puglands.game.databinding.ActivityMainBinding
@@ -35,7 +32,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
@@ -56,6 +52,8 @@ import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.LineString
 import org.maplibre.geojson.Point
 import org.maplibre.geojson.Polygon
+import java.text.ParseException
+import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
@@ -65,8 +63,6 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var maplibreMap: MapLibreMap
-    private lateinit var auth: FirebaseAuth
-    private val db = Firebase.firestore
 
     private var mediaPlayer: MediaPlayer? = null
     private var secretTapCounter = 0
@@ -78,8 +74,9 @@ class MainActivity : AppCompatActivity() {
     private val allLands: StateFlow<List<Land>> = _allLands.asStateFlow()
 
     private var playerLocation: LatLng? = null
-    private var incomeBoostTimerJob: Job? = null // Renamed
-    private var rangeBoostTimerJob: Job? = null // NEW: Range boost timer job
+    private var incomeBoostTimerJob: Job? = null
+    private var rangeBoostTimerJob: Job? = null
+    private var gameStatePollingJob: Job? = null
 
     private val locationRequest = LocationEngineRequest.Builder(1000L)
         .setPriority(LocationEngineRequest.PRIORITY_HIGH_ACCURACY).build()
@@ -102,8 +99,8 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val STARTING_BALANCE = 50.0
-        private const val BASE_PLAYER_RANGE_METERS = 400.0 // Changed constant name to BASE
-        private const val RANGE_MULTIPLIER = 1.67 // NEW: 67% increase (1.0 + 0.67)
+        private const val BASE_PLAYER_RANGE_METERS = 400.0
+        private const val RANGE_MULTIPLIER = 1.67
         private const val LAND_COST = 50.0
         private const val LAND_PPS = 0.0000000011
         private const val ALL_LANDS_SOURCE_ID = "all-lands-source"
@@ -115,13 +112,38 @@ class MainActivity : AppCompatActivity() {
         private const val GRID_LAYER_ID = "grid-layer"
         private const val OWNER_NAME_PROPERTY_KEY = "owner_name"
         private const val IS_CURRENT_PLAYER_PROPERTY_KEY = "is_current_player"
+        private const val PREFS_NAME = "PuglandsPrefs"
+
+        // Helper to convert ISO String to Date
+        fun isoDateToDate(isoString: String?): Date? {
+            if (isoString == null) return null
+            return try {
+                // Handle ISO 8601 format including milliseconds and timezone
+                SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSSSSZZZZZ", Locale.US).parse(isoString.replace("Z", "+00:00"))
+            } catch (e: ParseException) {
+                null
+            }
+        }
+    }
+
+    private fun checkAndRestoreSession(): Boolean {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val uid = prefs.getString(AuthActivity.KEY_USER_ID, null)
+        val name = prefs.getString(AuthActivity.KEY_USER_NAME, null)
+
+        if (uid != null && name != null) {
+            // Restore session state in the ApiClient
+            ApiClient.currentAuthUser = AuthUser(uid, name)
+            return true
+        }
+        return false
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        auth = Firebase.auth
 
-        if (auth.currentUser == null) {
+        // FIX 1: Check SharedPreferences for saved session
+        if (!checkAndRestoreSession()) {
             startActivity(Intent(this, AuthActivity::class.java))
             finish()
             return
@@ -140,9 +162,10 @@ class MainActivity : AppCompatActivity() {
             setupMap()
         }
 
+        // Start game data loading/polling
         lifecycleScope.launch {
-            loadGameData()
-            observeGameState()
+            loadInitialGameDataAndStartPolling()
+            observeGameStateUI()
             launchOnlineIncomeLoop()
         }
     }
@@ -160,8 +183,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleSecretTap() {
-        // Using your saved name "pugplayzYT" for admin access is a cool idea!
-        if (auth.currentUser?.displayName != "pugplayzYT") return
+        // Use the authenticated user's name from the API Client (for admin access)
+        if (ApiClient.currentAuthUser?.name != "pugplayzYT") return
 
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastTapTime > 1000) {
@@ -180,7 +203,7 @@ class MainActivity : AppCompatActivity() {
     // REDEEM FUNCTIONALITY (Pugbucks only)
     private fun showRedeemDialog() {
         val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
             hint = "Amount to redeem (1-3)"
         }
         val container = LinearLayout(this).apply {
@@ -194,11 +217,11 @@ class MainActivity : AppCompatActivity() {
             .setMessage("1 Pugbuck = \$0.50. You can only redeem earned money, not your starting balance.")
             .setView(container)
             .setPositiveButton("Request") { _, _ ->
-                val amount = input.text.toString().toIntOrNull()
-                if (amount == null || amount < 1 || amount > 3) {
+                val amount = input.text.toString().toDoubleOrNull()
+                if (amount == null || amount < 1.0 || amount > 3.0) {
                     Toast.makeText(this, "Invalid amount. Must be between 1 and 3.", Toast.LENGTH_LONG).show()
                 } else {
-                    processRedemptionRequest(amount.toDouble())
+                    processRedemptionRequest(amount)
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -206,47 +229,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun processRedemptionRequest(amount: Double) {
-        val userId = auth.currentUser?.uid ?: return
-        val currentBalance = _userState.value?.balance ?: 0.0
-
-        if (currentBalance - amount < STARTING_BALANCE) {
-            Toast.makeText(this, "You can't redeem your starting balance or dip below it!", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        val redemptionsRef = db.collection("redemptions")
-
         lifecycleScope.launch {
             try {
-                val pendingRequests = redemptionsRef
-                    .whereEqualTo("userId", userId)
-                    .whereEqualTo("status", "pending")
-                    .get().await()
-
-                if (!pendingRequests.isEmpty) {
-                    Toast.makeText(this@MainActivity, "You already have a pending redemption request.", Toast.LENGTH_LONG).show()
-                    return@launch
-                }
-
-                val userName = auth.currentUser?.displayName ?: "Unknown Player"
-                val redemptionRequest = hashMapOf(
-                    "userId" to userId,
-                    "userName" to userName,
-                    "amount" to amount,
-                    "realMoneyValue" to amount * 0.50,
-                    "status" to "pending",
-                    "requestedAt" to FieldValue.serverTimestamp()
-                )
-
-                db.runBatch { batch ->
-                    batch.set(redemptionsRef.document(), redemptionRequest)
-                    batch.update(db.collection("users").document(userId), "balance", FieldValue.increment(-amount))
-                }.await()
-
-                // FIX: Changed Toast.LONG_LENGTH to Toast.LENGTH_LONG
+                // API Call to Flask server for redemption. Server handles all checks (balance, pending requests).
+                val updatedUser = ApiClient.submitRedemption(amount)
+                _userState.value = updatedUser
                 Toast.makeText(this@MainActivity, "Redemption request sent! Pug will review it.", Toast.LENGTH_LONG).show()
 
             } catch (e: Exception) {
+                // The server now throws a specific error if checks fail
                 Toast.makeText(this@MainActivity, "Error creating request: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
@@ -269,12 +260,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun grantPugbucks(amount: Double) {
-        val userId = auth.currentUser?.uid ?: return
-        db.collection("users").document(userId)
-            .update("balance", FieldValue.increment(amount))
-            .addOnSuccessListener {
-                Toast.makeText(this, "Granted $amount Pugbucks!", Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            try {
+                // API Call to Flask server. Server handles the 'pugplayzYT' admin check.
+                val updatedUser = ApiClient.grantPugbucks(amount)
+                _userState.value = updatedUser
+                Toast.makeText(this@MainActivity, "Granted $amount Pugbucks!", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show()
             }
+        }
     }
 
     private fun setupBackgroundMusic() {
@@ -283,84 +278,91 @@ class MainActivity : AppCompatActivity() {
         mediaPlayer?.setVolume(0.4f, 0.4f)
     }
 
-    private suspend fun loadGameData() {
-        val user = auth.currentUser ?: return
-        val userDocRef = db.collection("users").document(user.uid)
-
+    private suspend fun refreshAllData() {
+        val uid = ApiClient.currentAuthUser?.uid ?: return
         try {
-            val userSnapshot = userDocRef.get().await()
-
-            if (!userSnapshot.exists()) {
-                val newUser = User(uid = user.uid, name = user.displayName ?: "Pug Fan", balance = STARTING_BALANCE)
-                userDocRef.set(newUser).await()
-                _userState.value = newUser
-            } else {
-                val userProfile = userSnapshot.toObject<User>()!!
-                val myLandsSnapshot = db.collection("lands").whereEqualTo("ownerId", user.uid).get().await()
-                val myLandsCount = myLandsSnapshot.size()
-                val now = Date()
-
-                userProfile.lastSeen?.let { lastSeen ->
-                    var totalEarnings = 0.0
-                    val ppsPerLand = myLandsCount * LAND_PPS
-                    val boostEndTime = userProfile.boostEndTime
-
-                    if (boostEndTime != null && boostEndTime.after(lastSeen)) {
-                        val boostStartTime = lastSeen.time
-                        val actualBoostEndTime = minOf(now.time, boostEndTime.time)
-                        val boostedDurationSeconds = (actualBoostEndTime - boostStartTime) / 1000
-                        if (boostedDurationSeconds > 0) {
-                            totalEarnings += boostedDurationSeconds * ppsPerLand * 20
-                        }
-                        if (now.time > boostEndTime.time) {
-                            val normalStartTime = boostEndTime.time
-                            val normalDurationSeconds = (now.time - normalStartTime) / 1000
-                            if (normalDurationSeconds > 0) {
-                                totalEarnings += normalDurationSeconds * ppsPerLand
-                            }
-                        }
-                    } else {
-                        val timeOfflineSeconds = (now.time - lastSeen.time) / 1000
-                        if (timeOfflineSeconds > 0) {
-                            totalEarnings = timeOfflineSeconds * ppsPerLand
-                        }
-                    }
-
-                    if (totalEarnings > 0.0000000001) {
-                        val newBalance = userProfile.balance + totalEarnings
-                        userDocRef.update("balance", newBalance, "lastSeen", FieldValue.serverTimestamp()).await()
-                        val totalOfflineSeconds = (now.time - lastSeen.time) / 1000
-                        showOfflineEarningsDialog(totalEarnings, totalOfflineSeconds)
-                    } else {
-                        userDocRef.update("lastSeen", FieldValue.serverTimestamp()).await()
-                    }
-                }
+            val user = ApiClient.getUser(uid)
+            _userState.value = user
+            val lands = ApiClient.getAllLands()
+            _allLands.value = lands
+            if(::maplibreMap.isInitialized && maplibreMap.style?.isFullyLoaded == true) {
+                updateAllLandsLayer()
             }
-
-            userDocRef.addSnapshotListener { snapshot, _ ->
-                snapshot?.toObject<User>()?.let { updatedUser ->
-                    _userState.value = updatedUser
-                    // Updated to pass both boost times and ensure the range circle is updated
-                    updateBoostTimerUI(updatedUser.boostEndTime, updatedUser.rangeBoostEndTime)
-                    updatePlayerRangeLayer()
-                }
-            }
-
         } catch (e: Exception) {
-            Toast.makeText(this, "Error loading game data: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Error refreshing data: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
+
+    private suspend fun loadInitialGameDataAndStartPolling() {
+        val uid = ApiClient.currentAuthUser?.uid ?: return
+
+        // 1. Load initial user and land data immediately
+        try {
+            refreshAllData() // Initial load
+        } catch (e: Exception) {
+            // Already handled inside refreshAllData, but keep coroutine structure
+        }
+
+        // 2. Start Polling
+        gameStatePollingJob?.cancel()
+        gameStatePollingJob = lifecycleScope.launch {
+            while(true) {
+                // FIX 2: Synchronize client state before pulling to fix the live counter issue.
+                val currentBalance = _userState.value?.balance ?: 0.0
+                try {
+                    // 1. PUSH the client's current, live-updated balance to the server.
+                    // This prevents the server's older balance from overwriting the live counter.
+                    ApiClient.updateUser(mapOf("balance" to currentBalance))
+
+                    // 2. PULL the new state
+                    val user = ApiClient.getUser(uid)
+                    _userState.value = user
+
+                    // 3. PULL lands (This also updates the local land count used by launchOnlineIncomeLoop)
+                    val lands = ApiClient.getAllLands()
+                    _allLands.value = lands
+
+                    if(::maplibreMap.isInitialized && maplibreMap.style?.isFullyLoaded == true) {
+                        updateAllLandsLayer()
+                    }
+                } catch (e: Exception) {
+                    // Handle polling error
+                }
+                delay(5000) // Poll every 5 seconds
+            }
+        }
+    }
+
+    // FIX: New function to force a user data refresh (used in onResume)
+    private fun forceRefreshUserData() {
+        val uid = ApiClient.currentAuthUser?.uid ?: return
+        lifecycleScope.launch {
+            try {
+                // Only refresh user data, lands will update via the polling job or next map click
+                val user = ApiClient.getUser(uid)
+                _userState.value = user
+            } catch (e: Exception) {
+                // Silent fail is fine for resume refresh
+            }
+        }
+    }
+
 
     private fun launchOnlineIncomeLoop() = lifecycleScope.launch {
         while (true) {
             delay(1000)
-            val myLandsCount = _allLands.value.count { it.ownerId == auth.currentUser?.uid }
+            // FIX 3: Lands is updated from polling, ensuring the count is accurate.
+            val myLandsCount = _allLands.value.count { it.ownerId == ApiClient.currentAuthUser?.uid }
             if (myLandsCount > 0) {
                 var incomePerSecond = myLandsCount * LAND_PPS
-                val boostEndTime = _userState.value?.boostEndTime
+
+                // Convert ISO String to Date for local boost check
+                val boostEndTime = isoDateToDate(_userState.value?.boostEndTime)
+
                 if (boostEndTime != null && boostEndTime.after(Date())) {
                     incomePerSecond *= 20
                 }
+
                 _userState.update { currentUser ->
                     currentUser?.copy(balance = currentUser.balance + incomePerSecond)
                 }
@@ -368,8 +370,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun getCurrentRangeMeters(): Double { // NEW: Function to calculate dynamic range
-        val rangeBoostEndTime = _userState.value?.rangeBoostEndTime
+    private fun getCurrentRangeMeters(): Double {
+        val rangeBoostEndTime = isoDateToDate(_userState.value?.rangeBoostEndTime)
         val isBoostActive = rangeBoostEndTime != null && rangeBoostEndTime.after(Date())
         return if (isBoostActive) {
             BASE_PLAYER_RANGE_METERS * RANGE_MULTIPLIER
@@ -378,8 +380,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Updated to take both boost end times
-    private fun updateBoostTimerUI(incomeBoostEndTime: Date?, rangeBoostEndTime: Date?) {
+    private fun updateBoostTimerUI(user: User) {
+        val incomeBoostEndTime = isoDateToDate(user.boostEndTime)
+        val rangeBoostEndTime = isoDateToDate(user.rangeBoostEndTime)
+
         // Handle Income Boost Timer
         incomeBoostTimerJob?.cancel()
         if (incomeBoostEndTime != null && incomeBoostEndTime.after(Date())) {
@@ -401,7 +405,7 @@ class MainActivity : AppCompatActivity() {
             binding.boostTimerTextView.isVisible = false
         }
 
-        // NEW: Handle Range Boost Timer
+        // Handle Range Boost Timer
         binding.rangeBoostTimerTextView.let { rangeTimer ->
             rangeBoostTimerJob?.cancel()
             if (rangeBoostEndTime != null && rangeBoostEndTime.after(Date())) {
@@ -426,17 +430,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showOfflineEarningsDialog(earnings: Double, durationSeconds: Long) {
-        val formattedEarnings = formatCurrency(earnings)
-        val formattedDuration = formatDuration(durationSeconds)
-        AlertDialog.Builder(this)
-            .setTitle("💸 Welcome Back! 💸")
-            .setMessage("You earned:\n\n$formattedEarnings Pugbucks\n\nwhile you were away for $formattedDuration.")
-            .setPositiveButton("Awesome!", null)
-            .setCancelable(false)
-            .show()
-    }
-
     private fun formatDuration(totalSeconds: Long): String {
         if (totalSeconds <= 0) return "a moment"
         val hours = totalSeconds / 3600
@@ -449,31 +442,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun observeGameState() {
+    private fun observeGameStateUI() {
         lifecycleScope.launch {
             userState.collect { user ->
                 user?.let {
+                    // Update UI and Boost Timers whenever user data changes
                     binding.balanceTextView.text = "${formatCurrency(it.balance)} Pugbucks"
-                    binding.landsOwnedTextView.text = "Lands: ${_allLands.value.count { l -> l.ownerId == auth.currentUser?.uid }} | Vouchers: ${it.landVouchers}"
+                    val myLandsCount = _allLands.value.count { l -> l.ownerId == user.uid }
+                    binding.landsOwnedTextView.text = "Lands: $myLandsCount | Vouchers: ${it.landVouchers}"
+                    updateBoostTimerUI(it) // Re-call timer logic to refresh/start/stop
+                    updatePlayerRangeLayer() // Update range layer in case of range boost change
                 }
-            }
-        }
-
-        db.collection("lands").addSnapshotListener { snapshot, error ->
-            if (error != null) {
-                Toast.makeText(this, "Error fetching lands: ${error.message}", Toast.LENGTH_SHORT).show()
-                return@addSnapshotListener
-            }
-            snapshot?.let {
-                _allLands.value = it.toObjects(Land::class.java)
             }
         }
 
         lifecycleScope.launch {
             allLands.collect { lands ->
-                val myLandsCount = lands.count { it.ownerId == auth.currentUser?.uid }
-                val vouchers = _userState.value?.landVouchers ?: 0
-                binding.landsOwnedTextView.text = "Lands: $myLandsCount | Vouchers: $vouchers"
+                val user = _userState.value
+                user?.let {
+                    val myLandsCount = lands.count { l -> l.ownerId == user.uid }
+                    binding.landsOwnedTextView.text = "Lands: $myLandsCount | Vouchers: ${user.landVouchers}"
+                }
                 if(::maplibreMap.isInitialized && maplibreMap.style?.isFullyLoaded == true) {
                     updateAllLandsLayer()
                 }
@@ -481,63 +470,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun claimLandWithVoucher(gx: Int, gy: Int) {
-        val userId = auth.currentUser?.uid ?: return
-        val userName = auth.currentUser?.displayName ?: "???"
-        val currentVouchers = _userState.value?.landVouchers ?: 0
+    // Replaced claimLandWithVoucher/buyLand logic with one API call that uses a method parameter
+    private fun showAcquireLandDialog(gx: Int, gy: Int) {
+        val hasVoucher = (_userState.value?.landVouchers ?: 0) > 0
+        val builder = AlertDialog.Builder(this)
+            .setTitle("Acquire Land")
+            .setMessage("How do you want to get this plot?")
+            .setNegativeButton("Cancel", null)
 
-        if (currentVouchers < 1) {
-            Toast.makeText(this, "You don't have any land vouchers!", Toast.LENGTH_SHORT).show()
-            return
+        builder.setPositiveButton("Buy (${formatCurrency(LAND_COST)} PB)") { _, _ ->
+            acquireLand(gx, gy, "BUY")
         }
 
-        val landDocRef = db.collection("lands").document("${gx}_${gy}")
-        val userDocRef = db.collection("users").document(userId)
-
-        db.runTransaction { transaction ->
-            val existingLand = transaction.get(landDocRef)
-            if (existingLand.exists()) {
-                throw Exception("This land is already owned!")
+        if (hasVoucher) {
+            builder.setNeutralButton("Use Voucher (1)") { _, _ ->
+                acquireLand(gx, gy, "VOUCHER")
             }
-
-            transaction.update(userDocRef, "landVouchers", FieldValue.increment(-1))
-            val newLand = Land(gx, gy, LAND_PPS, userId, userName)
-            transaction.set(landDocRef, newLand)
-        }.addOnSuccessListener {
-            Toast.makeText(this, "Land claimed with a voucher!", Toast.LENGTH_SHORT).show()
-        }.addOnFailureListener {
-            Toast.makeText(this, "Claim failed: ${it.message}", Toast.LENGTH_SHORT).show()
         }
+        builder.show()
     }
 
-    private fun buyLand(gx: Int, gy: Int) {
-        val userId = auth.currentUser?.uid ?: return
-        val userName = auth.currentUser?.displayName ?: "???"
-        val currentBalance = _userState.value?.balance ?: 0.0
+    private fun acquireLand(gx: Int, gy: Int, method: String) {
+        lifecycleScope.launch {
+            try {
+                // API Call to Flask server for acquisition. Server handles all transactional logic.
+                val updatedUser = ApiClient.acquireLand(gx, gy, method)
 
-        if (currentBalance < LAND_COST) {
-            Toast.makeText(this, "Not enough pugbucks!", Toast.LENGTH_SHORT).show()
-            return
-        }
+                _userState.value = updatedUser
+                // FIX 4: Immediately pull all lands data after a successful acquisition
+                // (especially for VOUCHER/BUY) to ensure the local map state and land count updates
+                // before the next 5-second poll. This fixes the voucher "not claiming" bug.
+                val lands = ApiClient.getAllLands()
+                _allLands.value = lands
 
-        val landDocRef = db.collection("lands").document("${gx}_${gy}")
-        val userDocRef = db.collection("users").document(userId)
-
-        db.runTransaction { transaction ->
-            val existingLand = transaction.get(landDocRef)
-            if (existingLand.exists()) {
-                throw Exception("This land is already owned!")
+                Toast.makeText(this@MainActivity, "Land acquired via $method!", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Acquisition failed: ${e.message}", Toast.LENGTH_SHORT).show()
             }
-
-            val newBalance = currentBalance - LAND_COST
-            transaction.update(userDocRef, "balance", newBalance)
-
-            val newLand = Land(gx, gy, LAND_PPS, userId, userName)
-            transaction.set(landDocRef, newLand)
-        }.addOnSuccessListener {
-            Toast.makeText(this, "Land purchased!", Toast.LENGTH_SHORT).show()
-        }.addOnFailureListener {
-            Toast.makeText(this, "Purchase failed: ${it.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -589,7 +558,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateAllLandsLayer() {
         if (!::maplibreMap.isInitialized || maplibreMap.style?.isFullyLoaded == false) return
-        val currentUserId = auth.currentUser?.uid ?: return
+        val currentUserId = ApiClient.currentAuthUser?.uid ?: return
 
         maplibreMap.style?.getSourceAs<GeoJsonSource>(ALL_LANDS_SOURCE_ID)?.let { source ->
             val features = _allLands.value.map { land ->
@@ -677,25 +646,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showAcquireLandDialog(gx: Int, gy: Int) {
-        val hasVoucher = (_userState.value?.landVouchers ?: 0) > 0
-        val builder = AlertDialog.Builder(this)
-            .setTitle("Acquire Land")
-            .setMessage("How do you want to get this plot?")
-            .setNegativeButton("Cancel", null)
-
-        builder.setPositiveButton("Buy (${formatCurrency(LAND_COST)} PB)") { _, _ ->
-            buyLand(gx, gy)
-        }
-
-        if (hasVoucher) {
-            builder.setNeutralButton("Use Voucher (1)") { _, _ ->
-                claimLandWithVoucher(gx, gy)
-            }
-        }
-        builder.show()
-    }
-
     private fun showBulkClaimDialog() {
         val playerLoc = playerLocation ?: run {
             Toast.makeText(this, "Acquiring your location, try again in a moment.", Toast.LENGTH_SHORT).show()
@@ -746,29 +696,28 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val ownedLandCoords = _allLands.value.map { it.gx to it.gy }.toSet()
-                val nearbyUnownedPlots = mutableListOf<Pair<Int, Int>>()
+                val nearbyUnownedPlots = mutableListOf<Map<String, Int>>() // Changed to Map<String, Int> for API
                 val (centerGx, centerGy) = GridUtils.latLonToGrid(centerLocation)
 
-                val currentRange = getCurrentRangeMeters() // Use the dynamic range
+                val currentRange = getCurrentRangeMeters()
 
                 var searchRadius = 0
-                while (nearbyUnownedPlots.size < amountToClaim && searchRadius < 50) { // Safety break
+                while (nearbyUnownedPlots.size < amountToClaim && searchRadius < 50) {
                     for (dx in -searchRadius..searchRadius) {
                         for (dy in -searchRadius..searchRadius) {
-                            if (abs(dx) < searchRadius && abs(dy) < searchRadius) continue // Only check the outer ring
+                            if (abs(dx) < searchRadius && abs(dy) < searchRadius) continue
 
                             val gx = centerGx + dx
                             val gy = centerGy + dy
                             val plotCoords = gx to gy
 
-                            if (ownedLandCoords.contains(plotCoords) || nearbyUnownedPlots.contains(plotCoords)) {
+                            if (ownedLandCoords.contains(plotCoords) || nearbyUnownedPlots.any { it["gx"] == gx && it["gy"] == gy }) {
                                 continue
                             }
 
                             val plotCenterLatLng = GridUtils.gridToLatLon(gx + 0.5, gy + 0.5)
-                            // Use the dynamic range check
                             if (GridUtils.distanceInMeters(centerLocation, plotCenterLatLng) <= currentRange) {
-                                nearbyUnownedPlots.add(plotCoords)
+                                nearbyUnownedPlots.add(mapOf("gx" to gx, "gy" to gy))
                                 if (nearbyUnownedPlots.size >= amountToClaim) break
                             }
                         }
@@ -781,18 +730,15 @@ class MainActivity : AppCompatActivity() {
                     throw Exception("Could not find enough unowned land in range. Found ${nearbyUnownedPlots.size}. Move to a new area.")
                 }
 
-                val userId = auth.currentUser!!.uid
-                val userName = auth.currentUser!!.displayName ?: "???"
-                val userDocRef = db.collection("users").document(userId)
+                // API Call to Flask server for bulk claim. Server handles the transaction.
+                val updatedUser = ApiClient.bulkClaim(nearbyUnownedPlots)
 
-                db.runBatch { batch ->
-                    batch.update(userDocRef, "landVouchers", FieldValue.increment(-amountToClaim.toLong()))
-                    nearbyUnownedPlots.forEach { (gx, gy) ->
-                        val newLand = Land(gx, gy, LAND_PPS, userId, userName)
-                        val landDocRef = db.collection("lands").document("${gx}_${gy}")
-                        batch.set(landDocRef, newLand)
-                    }
-                }.await()
+                // Update UI state
+                _userState.value = updatedUser
+
+                // FIX: Pull land data immediately after bulk claim
+                val lands = ApiClient.getAllLands()
+                _allLands.value = lands
 
                 progressDialog.dismiss()
                 Toast.makeText(this@MainActivity, "Successfully claimed $amountToClaim new plots nearby!", Toast.LENGTH_LONG).show()
@@ -803,6 +749,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
 
     private val requestPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
         if (isGranted) {
@@ -840,18 +787,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveUserProgress() {
-        val user = auth.currentUser ?: return
-        _userState.value?.let { userState ->
-            db.collection("users").document(user.uid)
-                .update(
-                    mapOf(
-                        "balance" to userState.balance,
-                        "lastSeen" to FieldValue.serverTimestamp()
-                    )
-                )
+        val user = _userState.value ?: return
+
+        // This is primarily for triggering the server-side logic to update 'lastSeen' and current balance
+        lifecycleScope.launch {
+            try {
+                // Flask server will handle the balance and lastSeen update
+                ApiClient.updateUser(mapOf("balance" to user.balance))
+            } catch (e: Exception) {
+                // Handle failure to save data
+            }
         }
     }
-
 
     override fun onStart() {
         super.onStart()
@@ -866,6 +813,9 @@ class MainActivity : AppCompatActivity() {
             maplibreMap.locationComponent.locationEngine?.requestLocationUpdates(locationRequest, locationCallback, mainLooper)
         }
         mediaPlayer?.start()
+
+        // Force a data refresh when returning to the main screen to update vouchers/boost state immediately
+        forceRefreshUserData()
     }
 
     override fun onPause() {
@@ -880,8 +830,9 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         binding.mapView.onStop()
-        incomeBoostTimerJob?.cancel() // Renamed variable
-        rangeBoostTimerJob?.cancel() // NEW: Cancel range timer
+        incomeBoostTimerJob?.cancel()
+        rangeBoostTimerJob?.cancel()
+        gameStatePollingJob?.cancel() // Stop polling when the app is backgrounded
         saveUserProgress()
     }
 

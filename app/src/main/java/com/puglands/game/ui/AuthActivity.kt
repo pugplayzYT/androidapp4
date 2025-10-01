@@ -1,28 +1,31 @@
 package com.puglands.game.ui
 
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.ktx.auth
-import com.google.firebase.auth.ktx.userProfileChangeRequest
-import com.google.firebase.firestore.ktx.firestore
-import com.google.firebase.ktx.Firebase
-import com.puglands.game.data.database.User
+import androidx.lifecycle.lifecycleScope
+import com.puglands.game.api.ApiClient
 import com.puglands.game.databinding.ActivityAuthBinding
+import kotlinx.coroutines.launch
+import java.util.Locale
 
 class AuthActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityAuthBinding
-    private lateinit var auth: FirebaseAuth
+
+    companion object {
+        const val PREFS_NAME = "PuglandsPrefs"
+        const val KEY_USER_ID = "user_id"
+        const val KEY_USER_NAME = "user_name"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityAuthBinding.inflate(layoutInflater)
         setContentView(binding.root)
-
-        auth = Firebase.auth
 
         binding.loginButton.setOnClickListener {
             loginUser()
@@ -30,6 +33,14 @@ class AuthActivity : AppCompatActivity() {
         binding.signUpButton.setOnClickListener {
             signUpUser()
         }
+    }
+
+    private fun saveSession(uid: String, name: String) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString(KEY_USER_ID, uid)
+            .putString(KEY_USER_NAME, name)
+            .apply()
     }
 
     private fun signUpUser() {
@@ -42,32 +53,16 @@ class AuthActivity : AppCompatActivity() {
             return
         }
 
-        auth.createUserWithEmailAndPassword(email, password)
-            .addOnCompleteListener(this) { task ->
-                if (task.isSuccessful) {
-                    val firebaseUser = auth.currentUser!!
-                    val profileUpdates = userProfileChangeRequest {
-                        displayName = name
-                    }
-                    firebaseUser.updateProfile(profileUpdates)
-
-                    // Create user document in Firestore, now with all fields
-                    val newUser = User(
-                        uid = firebaseUser.uid,
-                        name = name,
-                        balance = 100.0,
-                        landVouchers = 0,
-                        boostEndTime = null
-                    )
-                    Firebase.firestore.collection("users").document(firebaseUser.uid)
-                        .set(newUser)
-                        .addOnSuccessListener {
-                            navigateToMain()
-                        }
-                } else {
-                    Toast.makeText(baseContext, "Sign Up Failed: ${task.exception?.message}", Toast.LENGTH_LONG).show()
-                }
+        lifecycleScope.launch {
+            try {
+                // API Call to Flask server for signup
+                val authUser = ApiClient.signup(name, email, password)
+                saveSession(authUser.uid, authUser.name)
+                navigateToMain()
+            } catch (e: Exception) {
+                Toast.makeText(baseContext, "Sign Up Failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
+        }
     }
 
     private fun loginUser() {
@@ -79,19 +74,35 @@ class AuthActivity : AppCompatActivity() {
             return
         }
 
-        auth.signInWithEmailAndPassword(email, password)
-            .addOnCompleteListener(this) { task ->
-                if (task.isSuccessful) {
-                    navigateToMain()
-                } else {
-                    Toast.makeText(baseContext, "Login Failed.", Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            try {
+                // API Call to Flask server for login
+                val loginResponse = ApiClient.login(email, password)
+
+                // Save session right after successful login
+                saveSession(loginResponse.uid, loginResponse.name)
+
+                // Show offline earnings dialog if there are earnings
+                if (loginResponse.offlineEarnings > 0.0000000001) {
+                    val formattedEarnings = String.format(Locale.US, "%.11f", loginResponse.offlineEarnings).trimEnd('0').trimEnd('.')
+                    AlertDialog.Builder(this@AuthActivity)
+                        .setTitle("💸 Welcome Back! 💸")
+                        .setMessage("You earned:\n\n$formattedEarnings Pugbucks\n\nwhile you were away.")
+                        .setPositiveButton("Awesome!", null)
+                        .setCancelable(false)
+                        .show()
                 }
+
+                navigateToMain()
+            } catch (e: Exception) {
+                Toast.makeText(baseContext, "Login Failed: ${e.message}", Toast.LENGTH_SHORT).show()
             }
+        }
     }
 
     private fun navigateToMain() {
         val intent = Intent(this, MainActivity::class.java)
         startActivity(intent)
-        finish() // Prevents user from going back to login screen
+        finish()
     }
 }
