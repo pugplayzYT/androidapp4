@@ -9,12 +9,17 @@ data class User(
     val uid: String = "",
     val name: String = "",
     val email: String = "",
-    val balance: Double = 0.0,
+    val balance: Double = 0.0, // Pugbucks
+    @SerializedName("pug_coins")
+    val pugCoins: Double = 0.0, // Premium currency
     val landVouchers: Int = 0,
-    // Timestamps are now ISO 8601 Strings from the Flask server
     val lastSeen: String? = null,
-    val boostEndTime: String? = null, // Tracks when the 20x income boost expires
-    val rangeBoostEndTime: String? = null // Tracks when the range boost expires
+    val boostEndTime: String? = null,
+    val rangeBoostEndTime: String? = null,
+    // New fields for daily ad limits
+    val lastVoucherAdWatch: String? = null,
+    val lastBoostAdWatch: String? = null,
+    val lastRangeBoostAdWatch: String? = null
 )
 
 /**

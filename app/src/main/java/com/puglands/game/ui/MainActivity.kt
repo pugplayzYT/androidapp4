@@ -141,32 +141,26 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // FIX 1: Check SharedPreferences for saved session
         if (!checkAndRestoreSession()) {
             startActivity(Intent(this, AuthActivity::class.java))
             finish()
             return
         }
-
         MapLibre.getInstance(this)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-
         binding.mapView.onCreate(savedInstanceState)
         setupBackgroundMusic()
         setupClickListeners()
-
         binding.mapView.getMapAsync { map ->
             maplibreMap = map
             setupMap()
         }
-
-        // Start game data loading/polling
         lifecycleScope.launch {
             loadInitialGameDataAndStartPolling()
             observeGameStateUI()
-            launchOnlineIncomeLoop()
+            // The line below was the cause of the error and has been removed:
+            // launchOnlineIncomeLoop()
         }
     }
 
@@ -180,10 +174,10 @@ class MainActivity : AppCompatActivity() {
         binding.uiCard.setOnClickListener { handleSecretTap() }
         binding.redeemButton.setOnClickListener { showRedeemDialog() }
         binding.bulkClaimButton.setOnClickListener { showBulkClaimDialog() }
+        binding.exchangeButton.setOnClickListener { showExchangeDialog() }
     }
 
     private fun handleSecretTap() {
-        // Use the authenticated user's name from the API Client (for admin access)
         if (ApiClient.currentAuthUser?.name != "pugplayzYT") return
 
         val currentTime = System.currentTimeMillis()
@@ -200,7 +194,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // REDEEM FUNCTIONALITY (Pugbucks only)
     private fun showRedeemDialog() {
         val input = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
@@ -213,8 +206,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         AlertDialog.Builder(this)
-            .setTitle("Redeem Pugbucks")
-            .setMessage("1 Pugbuck = \$0.50. You can only redeem earned money, not your starting balance.")
+            .setTitle("Redeem Pug Coins")
+            .setMessage("1 Pug Coin = \$0.50. You can redeem between 1 and 3 coins at a time.")
             .setView(container)
             .setPositiveButton("Request") { _, _ ->
                 val amount = input.text.toString().toDoubleOrNull()
@@ -231,13 +224,11 @@ class MainActivity : AppCompatActivity() {
     private fun processRedemptionRequest(amount: Double) {
         lifecycleScope.launch {
             try {
-                // API Call to Flask server for redemption. Server handles all checks (balance, pending requests).
                 val updatedUser = ApiClient.submitRedemption(amount)
                 _userState.value = updatedUser
                 Toast.makeText(this@MainActivity, "Redemption request sent! Pug will review it.", Toast.LENGTH_LONG).show()
 
             } catch (e: Exception) {
-                // The server now throws a specific error if checks fail
                 Toast.makeText(this@MainActivity, "Error creating request: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
@@ -262,7 +253,6 @@ class MainActivity : AppCompatActivity() {
     private fun grantPugbucks(amount: Double) {
         lifecycleScope.launch {
             try {
-                // API Call to Flask server. Server handles the 'pugplayzYT' admin check.
                 val updatedUser = ApiClient.grantPugbucks(amount)
                 _userState.value = updatedUser
                 Toast.makeText(this@MainActivity, "Granted $amount Pugbucks!", Toast.LENGTH_SHORT).show()
@@ -293,52 +283,34 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun loadInitialGameDataAndStartPolling() {
+    private fun loadInitialGameDataAndStartPolling() {
         val uid = ApiClient.currentAuthUser?.uid ?: return
-
-        // 1. Load initial user and land data immediately
-        try {
-            refreshAllData() // Initial load
-        } catch (e: Exception) {
-            // Already handled inside refreshAllData, but keep coroutine structure
-        }
-
-        // 2. Start Polling
         gameStatePollingJob?.cancel()
         gameStatePollingJob = lifecycleScope.launch {
-            while(true) {
-                // FIX 2: Synchronize client state before pulling to fix the live counter issue.
-                val currentBalance = _userState.value?.balance ?: 0.0
+            while (true) {
                 try {
-                    // 1. PUSH the client's current, live-updated balance to the server.
-                    // This prevents the server's older balance from overwriting the live counter.
-                    ApiClient.updateUser(mapOf("balance" to currentBalance))
-
-                    // 2. PULL the new state
+                    // BUG FIX: The client now ONLY fetches data. The server handles all calculations.
                     val user = ApiClient.getUser(uid)
                     _userState.value = user
 
-                    // 3. PULL lands (This also updates the local land count used by launchOnlineIncomeLoop)
                     val lands = ApiClient.getAllLands()
                     _allLands.value = lands
 
-                    if(::maplibreMap.isInitialized && maplibreMap.style?.isFullyLoaded == true) {
+                    if (::maplibreMap.isInitialized && maplibreMap.style?.isFullyLoaded == true) {
                         updateAllLandsLayer()
                     }
                 } catch (e: Exception) {
-                    // Handle polling error
+                    // Handle polling error silently in the background
                 }
                 delay(5000) // Poll every 5 seconds
             }
         }
     }
 
-    // FIX: New function to force a user data refresh (used in onResume)
     private fun forceRefreshUserData() {
         val uid = ApiClient.currentAuthUser?.uid ?: return
         lifecycleScope.launch {
             try {
-                // Only refresh user data, lands will update via the polling job or next map click
                 val user = ApiClient.getUser(uid)
                 _userState.value = user
             } catch (e: Exception) {
@@ -348,27 +320,6 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-    private fun launchOnlineIncomeLoop() = lifecycleScope.launch {
-        while (true) {
-            delay(1000)
-            // FIX 3: Lands is updated from polling, ensuring the count is accurate.
-            val myLandsCount = _allLands.value.count { it.ownerId == ApiClient.currentAuthUser?.uid }
-            if (myLandsCount > 0) {
-                var incomePerSecond = myLandsCount * LAND_PPS
-
-                // Convert ISO String to Date for local boost check
-                val boostEndTime = isoDateToDate(_userState.value?.boostEndTime)
-
-                if (boostEndTime != null && boostEndTime.after(Date())) {
-                    incomePerSecond *= 20
-                }
-
-                _userState.update { currentUser ->
-                    currentUser?.copy(balance = currentUser.balance + incomePerSecond)
-                }
-            }
-        }
-    }
 
     private fun getCurrentRangeMeters(): Double {
         val rangeBoostEndTime = isoDateToDate(_userState.value?.rangeBoostEndTime)
@@ -384,7 +335,6 @@ class MainActivity : AppCompatActivity() {
         val incomeBoostEndTime = isoDateToDate(user.boostEndTime)
         val rangeBoostEndTime = isoDateToDate(user.rangeBoostEndTime)
 
-        // Handle Income Boost Timer
         incomeBoostTimerJob?.cancel()
         if (incomeBoostEndTime != null && incomeBoostEndTime.after(Date())) {
             binding.boostTimerTextView.isVisible = true
@@ -405,7 +355,6 @@ class MainActivity : AppCompatActivity() {
             binding.boostTimerTextView.isVisible = false
         }
 
-        // Handle Range Boost Timer
         binding.rangeBoostTimerTextView.let { rangeTimer ->
             rangeBoostTimerJob?.cancel()
             if (rangeBoostEndTime != null && rangeBoostEndTime.after(Date())) {
@@ -415,7 +364,7 @@ class MainActivity : AppCompatActivity() {
                         val remainingTime = rangeBoostEndTime.time - System.currentTimeMillis()
                         if (remainingTime <= 0) {
                             rangeTimer.isVisible = false
-                            updatePlayerRangeLayer() // Update map to shrink circle
+                            updatePlayerRangeLayer()
                             break
                         }
                         val minutes = TimeUnit.MILLISECONDS.toMinutes(remainingTime)
@@ -446,12 +395,13 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             userState.collect { user ->
                 user?.let {
-                    // Update UI and Boost Timers whenever user data changes
-                    binding.balanceTextView.text = "${formatCurrency(it.balance)} Pugbucks"
+                    val pugbucksText = "Pugbucks: ${formatCurrency(it.balance)}"
+                    val pugcoinsText = "Pug Coins: ${formatCurrency(it.pugCoins)}"
+                    binding.balanceTextView.text = "$pugbucksText\n$pugcoinsText"
                     val myLandsCount = _allLands.value.count { l -> l.ownerId == user.uid }
                     binding.landsOwnedTextView.text = "Lands: $myLandsCount | Vouchers: ${it.landVouchers}"
-                    updateBoostTimerUI(it) // Re-call timer logic to refresh/start/stop
-                    updatePlayerRangeLayer() // Update range layer in case of range boost change
+                    updateBoostTimerUI(it)
+                    updatePlayerRangeLayer()
                 }
             }
         }
@@ -470,7 +420,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Replaced claimLandWithVoucher/buyLand logic with one API call that uses a method parameter
     private fun showAcquireLandDialog(gx: Int, gy: Int) {
         val hasVoucher = (_userState.value?.landVouchers ?: 0) > 0
         val builder = AlertDialog.Builder(this)
@@ -478,7 +427,7 @@ class MainActivity : AppCompatActivity() {
             .setMessage("How do you want to get this plot?")
             .setNegativeButton("Cancel", null)
 
-        builder.setPositiveButton("Buy (${formatCurrency(LAND_COST)} PB)") { _, _ ->
+        builder.setPositiveButton("Buy (${formatCurrency(LAND_COST)} Pugbucks)") { _, _ ->
             acquireLand(gx, gy, "BUY")
         }
 
@@ -493,13 +442,8 @@ class MainActivity : AppCompatActivity() {
     private fun acquireLand(gx: Int, gy: Int, method: String) {
         lifecycleScope.launch {
             try {
-                // API Call to Flask server for acquisition. Server handles all transactional logic.
                 val updatedUser = ApiClient.acquireLand(gx, gy, method)
-
                 _userState.value = updatedUser
-                // FIX 4: Immediately pull all lands data after a successful acquisition
-                // (especially for VOUCHER/BUY) to ensure the local map state and land count updates
-                // before the next 5-second poll. This fixes the voucher "not claiming" bug.
                 val lands = ApiClient.getAllLands()
                 _allLands.value = lands
 
@@ -509,6 +453,46 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
+    private fun showExchangeDialog() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            hint = "Pug Coins to exchange"
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(50, 50, 50, 50)
+            addView(input)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Exchange Pug Coins")
+            .setMessage("1 Pug Coin = 150 Pugbucks")
+            .setView(container)
+            .setPositiveButton("Exchange") { _, _ ->
+                val amount = input.text.toString().toDoubleOrNull()
+                if (amount == null || amount < 1.0) {
+                    Toast.makeText(this, "Invalid amount. Must be at least 1.", Toast.LENGTH_LONG).show()
+                } else {
+                    exchangePugCoins(amount)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun exchangePugCoins(amount: Double) {
+        lifecycleScope.launch {
+            try {
+                val updatedUser = ApiClient.exchangePugCoins(amount)
+                _userState.value = updatedUser
+                Toast.makeText(this@MainActivity, "Exchanged $amount Pug Coins for ${amount * 150} Pugbucks!", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Exchange failed: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
 
     private fun setupMap() {
         val styleUrl = "https://demotiles.maplibre.org/style.json"
@@ -614,11 +598,10 @@ class MainActivity : AppCompatActivity() {
         val location = playerLocation ?: return
         if (!::maplibreMap.isInitialized) return
 
-        // Get the current player range (boosted or base)
         val currentRange = getCurrentRangeMeters()
 
         maplibreMap.style?.getSourceAs<GeoJsonSource>(PLAYER_RANGE_SOURCE_ID)?.let { source ->
-            source.setGeoJson(createCirclePolygon(location, currentRange)) // Use the dynamic range
+            source.setGeoJson(createCirclePolygon(location, currentRange))
         }
     }
 
@@ -636,7 +619,6 @@ class MainActivity : AppCompatActivity() {
             }
 
             val distance = GridUtils.distanceInMeters(playerLoc, latLng)
-            // Use the dynamic range from the new function
             if (distance > getCurrentRangeMeters()) {
                 Toast.makeText(this, "This land is out of your range!", Toast.LENGTH_SHORT).show()
                 return@addOnMapClickListener true
@@ -696,7 +678,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val ownedLandCoords = _allLands.value.map { it.gx to it.gy }.toSet()
-                val nearbyUnownedPlots = mutableListOf<Map<String, Int>>() // Changed to Map<String, Int> for API
+                val nearbyUnownedPlots = mutableListOf<Map<String, Int>>()
                 val (centerGx, centerGy) = GridUtils.latLonToGrid(centerLocation)
 
                 val currentRange = getCurrentRangeMeters()
@@ -730,13 +712,10 @@ class MainActivity : AppCompatActivity() {
                     throw Exception("Could not find enough unowned land in range. Found ${nearbyUnownedPlots.size}. Move to a new area.")
                 }
 
-                // API Call to Flask server for bulk claim. Server handles the transaction.
                 val updatedUser = ApiClient.bulkClaim(nearbyUnownedPlots)
 
-                // Update UI state
                 _userState.value = updatedUser
 
-                // FIX: Pull land data immediately after bulk claim
                 val lands = ApiClient.getAllLands()
                 _allLands.value = lands
 
@@ -789,11 +768,9 @@ class MainActivity : AppCompatActivity() {
     private fun saveUserProgress() {
         val user = _userState.value ?: return
 
-        // This is primarily for triggering the server-side logic to update 'lastSeen' and current balance
         lifecycleScope.launch {
             try {
-                // Flask server will handle the balance and lastSeen update
-                ApiClient.updateUser(mapOf("balance" to user.balance))
+                ApiClient.updateUser(mapOf("balance" to user.balance, "pug_coins" to user.pugCoins))
             } catch (e: Exception) {
                 // Handle failure to save data
             }
@@ -814,7 +791,6 @@ class MainActivity : AppCompatActivity() {
         }
         mediaPlayer?.start()
 
-        // Force a data refresh when returning to the main screen to update vouchers/boost state immediately
         forceRefreshUserData()
     }
 
@@ -827,13 +803,14 @@ class MainActivity : AppCompatActivity() {
         mediaPlayer?.pause()
     }
 
+    // BUG FIX: The onStop method no longer needs to save progress, as the server does it automatically.
     override fun onStop() {
         super.onStop()
         binding.mapView.onStop()
         incomeBoostTimerJob?.cancel()
         rangeBoostTimerJob?.cancel()
         gameStatePollingJob?.cancel() // Stop polling when the app is backgrounded
-        saveUserProgress()
+        // No longer need to call saveUserProgress()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

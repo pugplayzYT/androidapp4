@@ -15,7 +15,6 @@ import kotlin.math.max
 class PlotsActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityPlotsBinding
-    // Firebase components removed
     private lateinit var plotAdapter: PlotAdapter
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,14 +39,11 @@ class PlotsActivity : AppCompatActivity() {
                 return@launch
             }
             try {
-                // API Call to Flask server to get user's lands
                 val lands = ApiClient.getUserLands(userId)
-
                 plotAdapter.submitList(lands)
-
                 val totalPPS = lands.sumOf { it.pps }
                 val formattedTotal = formatCurrency(totalPPS)
-                binding.totalIncomeTextView.text = "Total Income:\n$formattedTotal Pugbucks/sec"
+                binding.totalIncomeTextView.text = "Total Income:\n$formattedTotal Pug Coins/sec"
             } catch (e: Exception) {
                 binding.totalIncomeTextView.text = "Could not load plot data: ${e.message}"
             }
@@ -60,7 +56,7 @@ class PlotsActivity : AppCompatActivity() {
 
         val detailedMessage = "Owner: $userName\n" +
                 "Grid: (${land.gx}, ${land.gy})\n" +
-                "Income: $formattedPPS PB/sec"
+                "Income: $formattedPPS Pug Coins/sec"
 
         AlertDialog.Builder(this)
             .setTitle("Plot Stats")

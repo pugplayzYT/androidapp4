@@ -42,7 +42,7 @@
                 android:textStyle="bold"
                 app:layout_constraintStart_toStartOf="parent"
                 app:layout_constraintTop_toTopOf="parent"
-                tools:text="50.0000000000 Pugbucks" />
+                tools:text="Pugbucks: 50.0\nPug Coins: 0.0" />
 
             <TextView
                 android:id="@+id/landsOwnedTextView"
@@ -135,6 +135,16 @@
                     app:strokeColor="?attr/colorPrimary" />
 
             </LinearLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/exchangeButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Exchange Coins"
+                app:layout_constraintTop_toBottomOf="@id/button_layout_bottom_row"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"/>
 
         </androidx.constraintlayout.widget.ConstraintLayout>
 

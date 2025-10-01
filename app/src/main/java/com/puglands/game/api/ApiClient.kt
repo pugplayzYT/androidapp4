@@ -10,7 +10,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -52,8 +51,6 @@ object ApiClient {
                 connection.doOutput = true
                 val jsonBody = gson.toJson(body)
                 OutputStreamWriter(connection.outputStream).use {
-                    // FIX: Directly write the String to the OutputStreamWriter,
-                    // which handles the UTF-8 conversion based on the charset.
                     it.write(jsonBody)
                     it.flush()
                 }
@@ -137,10 +134,14 @@ object ApiClient {
         return gson.fromJson(userJson, User::class.java)
     }
 
+    suspend fun exchangePugCoins(amount: Double): User {
+        val body = mapOf("amount" to amount)
+        val json = executeRequest("exchange_coins", "POST", body, authenticated = true)
+        return gson.fromJson(json, User::class.java)
+    }
+
     // --- Rewards/Admin Endpoints ---
 
-    // The grant functions now call dedicated endpoints that handle server-side state logic
-    // and return the updated user object.
     suspend fun grantVoucher(): User {
         val json = executeRequest("grant_voucher", "POST", authenticated = true)
         return gson.fromJson(json, User::class.java)

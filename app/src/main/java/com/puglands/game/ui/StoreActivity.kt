@@ -1,7 +1,7 @@
 package com.puglands.game.ui
 
 import android.os.Bundle
-import android.view.View
+import android.widget.Button
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -10,7 +10,6 @@ import com.google.android.gms.ads.MobileAds
 import com.google.android.gms.ads.admanager.AdManagerAdRequest
 import com.google.android.gms.ads.rewarded.RewardedAd
 import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback
-import com.puglands.game.R
 import com.puglands.game.api.ApiClient
 import com.puglands.game.data.database.User
 import com.puglands.game.databinding.ActivityStoreBinding
@@ -21,22 +20,27 @@ import java.text.ParseException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
 class StoreActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityStoreBinding
-    // Firebase components removed
     private var user: User? = null
 
-    // Ads variables
     private var voucherRewardedAd: RewardedAd? = null
     private var boostRewardedAd: RewardedAd? = null
     private var rangeRewardedAd: RewardedAd? = null
-    private val adUnitId = "ca-app-pub-3940256099942544/5224354917"
+    private val adUnitId = "ca-app-pub-3940256099942544/5224354917" // Test Ad ID
 
-    private var incomeTimerJob: Job? = null
-    private var rangeTimerJob: Job? = null
+    // Jobs to manage the countdown timers on the buttons
+    private var voucherCooldownJob: Job? = null
+    private var boostCooldownJob: Job? = null
+    private var rangeCooldownJob: Job? = null
+
+    companion object {
+        const val AD_COOLDOWN_HOURS = 23
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,8 +53,6 @@ class StoreActivity : AppCompatActivity() {
         loadBoostRewardedAd()
         loadRangeRewardedAd()
 
-        loadUserData()
-
         binding.watchAdButton.setOnClickListener { showVoucherRewardedAd() }
         binding.watchBoostAdButton.setOnClickListener { showBoostRewardedAd() }
         binding.watchRangeBoostAdButton.setOnClickListener { showRangeRewardedAd() }
@@ -58,36 +60,34 @@ class StoreActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Re-load data when activity resumes to get latest state
         loadUserData()
     }
 
     override fun onStop() {
         super.onStop()
-        incomeTimerJob?.cancel()
-        rangeTimerJob?.cancel()
+        // Cancel all countdown timers when the activity is not visible
+        voucherCooldownJob?.cancel()
+        boostCooldownJob?.cancel()
+        rangeCooldownJob?.cancel()
     }
 
-    // Helper to convert ISO String timestamp to Date object
     private fun isoDateToDate(isoString: String?): Date? {
         if (isoString == null) return null
         return try {
-            // Flask server uses UTC with Z or +00:00. This handles ISO 8601.
-            SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSSSSZZZZZ", Locale.US).parse(isoString.replace("Z", "+00:00"))
+            val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSSSSZZZZZ", Locale.US)
+            format.timeZone = TimeZone.getTimeZone("UTC")
+            format.parse(isoString.replace("Z", "+0000"))
         } catch (e: ParseException) {
             null
         }
     }
 
-
     private fun loadUserData() {
         val userId = ApiClient.currentAuthUser?.uid ?: return
         lifecycleScope.launch {
             try {
-                // API Call to Flask server to get user data
                 user = ApiClient.getUser(userId)
                 updateUI()
-                startBoostTimers()
             } catch (e: Exception) {
                 Toast.makeText(this@StoreActivity, "Failed to load user data: ${e.message}", Toast.LENGTH_SHORT).show()
             }
@@ -97,73 +97,61 @@ class StoreActivity : AppCompatActivity() {
     private fun updateUI() {
         user?.let {
             binding.vouchersTextView.text = "You have ${it.landVouchers} Land Vouchers"
+
+            // Check cooldowns for each ad type and update button states
+            updateAdButtonState(binding.watchAdButton, it.lastVoucherAdWatch, "Watch Ad for a Land Voucher") { job -> voucherCooldownJob = job }
+            updateAdButtonState(binding.watchBoostAdButton, it.lastBoostAdWatch, "Watch Ad for 20x Boost (10 mins)") { job -> boostCooldownJob = job }
+            updateAdButtonState(binding.watchRangeBoostAdButton, it.lastRangeBoostAdWatch, "Watch Ad for 67% Range Boost (5 mins)") { job -> rangeCooldownJob = job }
         }
-        binding.watchAdButton.isEnabled = voucherRewardedAd != null
-        binding.watchBoostAdButton.isEnabled = boostRewardedAd != null
-        binding.watchRangeBoostAdButton.isEnabled = rangeRewardedAd != null
     }
 
-    private fun startBoostTimers() {
-        // Income Boost Timer
-        incomeTimerJob?.cancel()
-        val boostEndTime = isoDateToDate(user?.boostEndTime)?.time ?: 0
-        updateTimer(boostEndTime, binding.boostTimerTextView) { incomeTimerJob = it }
+    private fun updateAdButtonState(button: Button, lastWatchIso: String?, defaultText: String, jobSetter: (Job?) -> Unit) {
+        jobSetter(null) // Cancel any existing job for this button
+        val lastWatchDate = isoDateToDate(lastWatchIso)
 
-        // Range Boost Timer
-        rangeTimerJob?.cancel()
-        val rangeBoostEndTime = isoDateToDate(user?.rangeBoostEndTime)?.time ?: 0
-        updateTimer(rangeBoostEndTime, binding.rangeBoostTimerTextView) { rangeTimerJob = it }
-    }
+        if (lastWatchDate == null) {
+            button.isEnabled = true
+            button.text = defaultText
+            return
+        }
 
-    private fun updateTimer(endTime: Long, textView: View, jobSetter: (Job?) -> Unit) {
-        if (endTime > System.currentTimeMillis()) {
-            textView.visibility = View.VISIBLE
+        val cooldownEndTime = lastWatchDate.time + TimeUnit.HOURS.toMillis(AD_COOLDOWN_HOURS.toLong())
+
+        if (System.currentTimeMillis() < cooldownEndTime) {
+            button.isEnabled = false
+            // Start a countdown timer on the button
             jobSetter(lifecycleScope.launch {
-                while (true) {
-                    val remainingTime = endTime - System.currentTimeMillis()
+                while(true) {
+                    val remainingTime = cooldownEndTime - System.currentTimeMillis()
                     if (remainingTime <= 0) {
-                        textView.visibility = View.GONE
-                        // Re-load user data to update the local 'user' object and sync the state
-                        loadUserData()
+                        button.isEnabled = true
+                        button.text = defaultText
                         break
                     }
-                    val minutes = TimeUnit.MILLISECONDS.toMinutes(remainingTime)
+                    val hours = TimeUnit.MILLISECONDS.toHours(remainingTime)
+                    val minutes = TimeUnit.MILLISECONDS.toMinutes(remainingTime) % 60
                     val seconds = TimeUnit.MILLISECONDS.toSeconds(remainingTime) % 60
-                    // Check the view ID to determine the text format
-                    val prefix = if (textView.id == R.id.boostTimerTextView) "Boost" else "Range Boost"
-                    (textView as android.widget.TextView).text = String.format("%s active: %02d:%02d", prefix, minutes, seconds)
+                    button.text = String.format(Locale.US, "Ready in %02d:%02d:%02d", hours, minutes, seconds)
                     delay(1000)
                 }
             })
         } else {
-            textView.visibility = View.GONE
-            jobSetter(null)
+            button.isEnabled = true
+            button.text = defaultText
         }
     }
 
-    // --- Voucher Ad Logic ---
+    // --- Ad Logic (Voucher, Boost, Range) ---
     private fun loadVoucherRewardedAd() {
-        binding.watchAdButton.isEnabled = false
-        val adRequest = AdManagerAdRequest.Builder().build()
-        RewardedAd.load(this, adUnitId, adRequest, object : RewardedAdLoadCallback() {
-            override fun onAdFailedToLoad(adError: LoadAdError) {
-                voucherRewardedAd = null
-            }
-
-            override fun onAdLoaded(ad: RewardedAd) {
-                voucherRewardedAd = ad
-                binding.watchAdButton.isEnabled = true
-            }
+        RewardedAd.load(this, adUnitId, AdManagerAdRequest.Builder().build(), object : RewardedAdLoadCallback() {
+            override fun onAdLoaded(ad: RewardedAd) { voucherRewardedAd = ad }
+            override fun onAdFailedToLoad(adError: LoadAdError) { voucherRewardedAd = null }
         })
     }
 
     private fun showVoucherRewardedAd() {
-        voucherRewardedAd?.let { ad ->
-            ad.show(this) { _ -> grantVoucher() }
-            voucherRewardedAd = null
-            loadVoucherRewardedAd()
-        } ?: run {
-            Toast.makeText(this, "The ad wasn't ready. Please try again.", Toast.LENGTH_SHORT).show()
+        voucherRewardedAd?.show(this) { grantVoucher() } ?: run {
+            Toast.makeText(this, "Ad not ready. Try again.", Toast.LENGTH_SHORT).show()
             loadVoucherRewardedAd()
         }
     }
@@ -171,40 +159,26 @@ class StoreActivity : AppCompatActivity() {
     private fun grantVoucher() {
         lifecycleScope.launch {
             try {
-                // API Call to Flask server to grant voucher
                 val updatedUser = ApiClient.grantVoucher()
-                user = updatedUser // Update local state
+                user = updatedUser
                 updateUI()
                 Toast.makeText(this@StoreActivity, "🎉 You earned 1 Land Voucher! 🎉", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
-                Toast.makeText(this@StoreActivity, "Grant failed: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@StoreActivity, "Reward failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    // --- Boost Ad Logic ---
     private fun loadBoostRewardedAd() {
-        binding.watchBoostAdButton.isEnabled = false
-        val adRequest = AdManagerAdRequest.Builder().build()
-        RewardedAd.load(this, adUnitId, adRequest, object : RewardedAdLoadCallback() {
-            override fun onAdFailedToLoad(adError: LoadAdError) {
-                boostRewardedAd = null
-            }
-
-            override fun onAdLoaded(ad: RewardedAd) {
-                boostRewardedAd = ad
-                binding.watchBoostAdButton.isEnabled = true
-            }
+        RewardedAd.load(this, adUnitId, AdManagerAdRequest.Builder().build(), object : RewardedAdLoadCallback() {
+            override fun onAdLoaded(ad: RewardedAd) { boostRewardedAd = ad }
+            override fun onAdFailedToLoad(adError: LoadAdError) { boostRewardedAd = null }
         })
     }
 
     private fun showBoostRewardedAd() {
-        boostRewardedAd?.let { ad ->
-            ad.show(this) { _ -> grantBoost() }
-            boostRewardedAd = null
-            loadBoostRewardedAd()
-        } ?: run {
-            Toast.makeText(this, "The boost ad wasn't ready. Please try again.", Toast.LENGTH_SHORT).show()
+        boostRewardedAd?.show(this) { grantBoost() } ?: run {
+            Toast.makeText(this, "Ad not ready. Try again.", Toast.LENGTH_SHORT).show()
             loadBoostRewardedAd()
         }
     }
@@ -212,39 +186,26 @@ class StoreActivity : AppCompatActivity() {
     private fun grantBoost() {
         lifecycleScope.launch {
             try {
-                // API Call to Flask server to grant income boost
                 val updatedUser = ApiClient.grantBoost()
-                user = updatedUser // Update local state
-                startBoostTimers() // Restart timer with new end time
-                Toast.makeText(this@StoreActivity, "🚀 20x Boost Activated for 10 minutes! 🚀", Toast.LENGTH_LONG).show()
+                user = updatedUser
+                updateUI()
+                Toast.makeText(this@StoreActivity, "🚀 20x Boost Activated! 🚀", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
-                Toast.makeText(this@StoreActivity, "Grant failed: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@StoreActivity, "Reward failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    // --- Range Boost Ad Logic ---
     private fun loadRangeRewardedAd() {
-        binding.watchRangeBoostAdButton.isEnabled = false
-        val adRequest = AdManagerAdRequest.Builder().build()
-        RewardedAd.load(this, adUnitId, adRequest, object : RewardedAdLoadCallback() {
-            override fun onAdFailedToLoad(adError: LoadAdError) {
-                rangeRewardedAd = null
-            }
-            override fun onAdLoaded(ad: RewardedAd) {
-                rangeRewardedAd = ad
-                binding.watchRangeBoostAdButton.isEnabled = true
-            }
+        RewardedAd.load(this, adUnitId, AdManagerAdRequest.Builder().build(), object : RewardedAdLoadCallback() {
+            override fun onAdLoaded(ad: RewardedAd) { rangeRewardedAd = ad }
+            override fun onAdFailedToLoad(adError: LoadAdError) { rangeRewardedAd = null }
         })
     }
 
     private fun showRangeRewardedAd() {
-        rangeRewardedAd?.let { ad ->
-            ad.show(this) { _ -> grantRangeBoost() }
-            rangeRewardedAd = null
-            loadRangeRewardedAd()
-        } ?: run {
-            Toast.makeText(this, "The range boost ad wasn't ready. Please try again.", Toast.LENGTH_SHORT).show()
+        rangeRewardedAd?.show(this) { grantRangeBoost() } ?: run {
+            Toast.makeText(this, "Ad not ready. Try again.", Toast.LENGTH_SHORT).show()
             loadRangeRewardedAd()
         }
     }
@@ -252,13 +213,12 @@ class StoreActivity : AppCompatActivity() {
     private fun grantRangeBoost() {
         lifecycleScope.launch {
             try {
-                // API Call to Flask server to grant range boost
                 val updatedUser = ApiClient.grantRangeBoost()
-                user = updatedUser // Update local state
-                startBoostTimers() // Restart range timer with new end time
-                Toast.makeText(this@StoreActivity, "🛰️ 67% Range Boost Activated for 5 minutes! 🛰️", Toast.LENGTH_LONG).show()
+                user = updatedUser
+                updateUI()
+                Toast.makeText(this@StoreActivity, "🛰️ Range Boost Activated! 🛰️", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
-                Toast.makeText(this@StoreActivity, "Grant failed: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@StoreActivity, "Reward failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }

@@ -27,17 +27,12 @@ class AuthActivity : AppCompatActivity() {
         binding = ActivityAuthBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        binding.loginButton.setOnClickListener {
-            loginUser()
-        }
-        binding.signUpButton.setOnClickListener {
-            signUpUser()
-        }
+        binding.loginButton.setOnClickListener { loginUser() }
+        binding.signUpButton.setOnClickListener { signUpUser() }
     }
 
     private fun saveSession(uid: String, name: String) {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit()
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putString(KEY_USER_ID, uid)
             .putString(KEY_USER_NAME, name)
             .apply()
@@ -55,10 +50,9 @@ class AuthActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                // API Call to Flask server for signup
                 val authUser = ApiClient.signup(name, email, password)
                 saveSession(authUser.uid, authUser.name)
-                navigateToMain()
+                navigateToMain(0.0) // No offline earnings for a new user
             } catch (e: Exception) {
                 Toast.makeText(baseContext, "Sign Up Failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
@@ -76,33 +70,36 @@ class AuthActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
-                // API Call to Flask server for login
                 val loginResponse = ApiClient.login(email, password)
-
-                // Save session right after successful login
                 saveSession(loginResponse.uid, loginResponse.name)
 
-                // Show offline earnings dialog if there are earnings
-                if (loginResponse.offlineEarnings > 0.0000000001) {
-                    val formattedEarnings = String.format(Locale.US, "%.11f", loginResponse.offlineEarnings).trimEnd('0').trimEnd('.')
-                    AlertDialog.Builder(this@AuthActivity)
-                        .setTitle("💸 Welcome Back! 💸")
-                        .setMessage("You earned:\n\n$formattedEarnings Pugbucks\n\nwhile you were away.")
-                        .setPositiveButton("Awesome!", null)
-                        .setCancelable(false)
-                        .show()
-                }
+                // FIX: Navigate to main and pass the offline earnings to be shown
+                navigateToMain(loginResponse.offlineEarnings)
 
-                navigateToMain()
             } catch (e: Exception) {
                 Toast.makeText(baseContext, "Login Failed: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    private fun navigateToMain() {
-        val intent = Intent(this, MainActivity::class.java)
-        startActivity(intent)
-        finish()
+    private fun navigateToMain(offlineEarnings: Double) {
+        // Show offline earnings dialog if there are any
+        if (offlineEarnings > 0.0000000001) {
+            val formattedEarnings = String.format(Locale.US, "%.11f", offlineEarnings).trimEnd('0').trimEnd('.')
+            AlertDialog.Builder(this)
+                .setTitle("💸 Welcome Back! 💸")
+                .setMessage("You earned:\n\n$formattedEarnings Pug Coins\n\nwhile you were away.")
+                .setPositiveButton("Awesome!") { _, _ ->
+                    // Start MainActivity after the user dismisses the dialog
+                    startActivity(Intent(this, MainActivity::class.java))
+                    finish()
+                }
+                .setCancelable(false)
+                .show()
+        } else {
+            // If no earnings, go straight to the game
+            startActivity(Intent(this, MainActivity::class.java))
+            finish()
+        }
     }
 }
