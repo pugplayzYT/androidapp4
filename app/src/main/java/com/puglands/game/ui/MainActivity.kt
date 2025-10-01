@@ -7,6 +7,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.media.MediaPlayer
+import android.widget.Button
+
 import android.os.Bundle
 import android.text.InputType
 import android.widget.EditText
@@ -485,24 +487,95 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showExchangeDialog() {
+        // Numeric value used for precise validation
+        val MIN_EXCHANGE_AMOUNT_NUMERIC = 0.0000005
+        // Simplified display string to avoid forcing users to type trailing zeros
+        val MIN_EXCHANGE_AMOUNT_DISPLAY = "0.0000005"
+        val MAX_EXCHANGE_AMOUNT_NUMERIC = 5.0
+        val MAX_EXCHANGE_AMOUNT_DISPLAY = "5"
+
+        // 1. Check for user data (necessary to get balance)
+        val user = _userState.value ?: run {
+            Toast.makeText(this, "User data not loaded. Please wait.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val currentPugCoins = user.pugCoins
+
+        // 2. Calculate the affordable maximum amount to exchange, capped by MAX_EXCHANGE_AMOUNT_NUMERIC
+        val maxAffordableAmount = kotlin.math.min(currentPugCoins, MAX_EXCHANGE_AMOUNT_NUMERIC)
+
+        // 3. Format the affordable amount for display
+        val maxAffordableDisplay = formatCurrency(maxAffordableAmount)
+
         val input = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-            hint = "Pug Coins to exchange"
+            // Display the simpler number
+            hint = "Pug Coins to exchange (min ${MIN_EXCHANGE_AMOUNT_DISPLAY}, max ${MAX_EXCHANGE_AMOUNT_DISPLAY})"
         }
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(50, 50, 50, 50)
-            addView(input)
+
+        // Set Minimum Button logic
+        val setMinButton = Button(this).apply {
+            text = "Set Min"
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1.0f
+            ).apply {
+                marginEnd = 10 // Add space between buttons
+            }
+            setOnClickListener {
+                input.setText(MIN_EXCHANGE_AMOUNT_DISPLAY)
+            }
         }
+
+        // 🚀 UPDATED: Set Max Affordable Button logic
+        val setMaxButton = Button(this).apply {
+            text = "Set Max Affordable"
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1.0f
+            )
+            setOnClickListener {
+                if (maxAffordableAmount < MIN_EXCHANGE_AMOUNT_NUMERIC) {
+                    Toast.makeText(this@MainActivity, "You don't have enough to meet the minimum exchange amount.", Toast.LENGTH_SHORT).show()
+                } else {
+                    // Set the maximum affordable amount, formatted to a user-friendly string
+                    input.setText(maxAffordableDisplay)
+                }
+            }
+        }
+
+        // Horizontal Layout for the buttons
+        val buttonRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = 20
+            }
+            addView(setMinButton)
+            addView(setMaxButton)
+        }
+
 
         AlertDialog.Builder(this)
             .setTitle("Exchange Pug Coins")
-            .setMessage("1 Pug Coin = 150 Pugbucks")
-            .setView(container)
+            // Display the simpler number in the message
+            .setMessage("1 Pug Coin = 150 Pugbucks. You can exchange between ${MIN_EXCHANGE_AMOUNT_DISPLAY} and ${MAX_EXCHANGE_AMOUNT_DISPLAY} coins.")
+            .setView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(50, 50, 50, 50)
+                addView(input)
+                addView(buttonRow)
+            })
             .setPositiveButton("Exchange") { _, _ ->
                 val amount = input.text.toString().toDoubleOrNull()
-                if (amount == null || amount < 1.0) {
-                    Toast.makeText(this, "Invalid amount. Must be at least 1.", Toast.LENGTH_LONG).show()
+                // Use the precise numeric value for validation
+                if (amount == null || amount < MIN_EXCHANGE_AMOUNT_NUMERIC || amount > MAX_EXCHANGE_AMOUNT_NUMERIC) {
+                    // Use the simpler display string in the error message
+                    Toast.makeText(this, "Invalid amount. Must be between ${MIN_EXCHANGE_AMOUNT_DISPLAY} and ${MAX_EXCHANGE_AMOUNT_DISPLAY}.", Toast.LENGTH_LONG).show()
                 } else {
                     exchangePugCoins(amount)
                 }
@@ -521,6 +594,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
 
     private fun setupMap() {
         val styleUrl = "https://demotiles.maplibre.org/style.json"
