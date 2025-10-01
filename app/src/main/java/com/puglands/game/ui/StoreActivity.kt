@@ -16,12 +16,12 @@ import com.puglands.game.databinding.ActivityStoreBinding
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.text.ParseException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
+import kotlin.math.max
 
 class StoreActivity : AppCompatActivity() {
 
@@ -40,6 +40,38 @@ class StoreActivity : AppCompatActivity() {
 
     companion object {
         const val AD_COOLDOWN_HOURS = 23
+
+        // 🚀 FIX: Robust date parser to handle inconsistent ISO 8601 strings from Flask
+        private val DATE_FORMATS = arrayOf(
+            // Flask default with microseconds and colon-separated timezone
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSSZ",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX",
+            // Format enforced in Python server code
+            "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'+00:00'",
+            // Simpler formats (in case microseconds are missing)
+            "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
+            "yyyy-MM-dd'T'HH:mm:ssZ"
+        )
+
+        fun isoDateToDate(isoString: String?): Date? {
+            if (isoString.isNullOrEmpty()) return null
+
+            // Clean the string by replacing the optional 'Z' (Zulu/UTC) with a format the parser expects
+            val cleanString = isoString.replace("Z", "+0000").replace("+00:00", "+0000")
+
+            for (formatString in DATE_FORMATS) {
+                try {
+                    val format = SimpleDateFormat(formatString, Locale.US)
+                    // It's critical to set the timezone, so the time math is correct
+                    format.timeZone = TimeZone.getTimeZone("UTC")
+
+                    return format.parse(cleanString)
+                } catch (e: Exception) {
+                    // Try the next format
+                }
+            }
+            return null // Parsing failed with all known formats
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -60,6 +92,7 @@ class StoreActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Ensure data is refreshed on resume to check cooldown status
         loadUserData()
     }
 
@@ -71,16 +104,8 @@ class StoreActivity : AppCompatActivity() {
         rangeCooldownJob?.cancel()
     }
 
-    private fun isoDateToDate(isoString: String?): Date? {
-        if (isoString == null) return null
-        return try {
-            val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSSSSZZZZZ", Locale.US)
-            format.timeZone = TimeZone.getTimeZone("UTC")
-            format.parse(isoString.replace("Z", "+0000"))
-        } catch (e: ParseException) {
-            null
-        }
-    }
+    // ❌ REMOVE the buggy original isoDateToDate here. It's now in the companion object.
+    // If you need a version of this in MainActivity, you must use the companion object's version.
 
     private fun loadUserData() {
         val userId = ApiClient.currentAuthUser?.uid ?: return
@@ -107,6 +132,8 @@ class StoreActivity : AppCompatActivity() {
 
     private fun updateAdButtonState(button: Button, lastWatchIso: String?, defaultText: String, jobSetter: (Job?) -> Unit) {
         jobSetter(null) // Cancel any existing job for this button
+
+        // 🎯 FIX: Use the robust parser from the companion object
         val lastWatchDate = isoDateToDate(lastWatchIso)
 
         if (lastWatchDate == null) {
@@ -115,6 +142,7 @@ class StoreActivity : AppCompatActivity() {
             return
         }
 
+        // Date math is correct since the parser enforces UTC
         val cooldownEndTime = lastWatchDate.time + TimeUnit.HOURS.toMillis(AD_COOLDOWN_HOURS.toLong())
 
         if (System.currentTimeMillis() < cooldownEndTime) {
@@ -159,9 +187,10 @@ class StoreActivity : AppCompatActivity() {
     private fun grantVoucher() {
         lifecycleScope.launch {
             try {
+                // This will send the request and update the user object on the server
                 val updatedUser = ApiClient.grantVoucher()
                 user = updatedUser
-                updateUI()
+                updateUI() // Update local UI after server success
                 Toast.makeText(this@StoreActivity, "🎉 You earned 1 Land Voucher! 🎉", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
                 Toast.makeText(this@StoreActivity, "Reward failed: ${e.message}", Toast.LENGTH_LONG).show()
@@ -186,9 +215,10 @@ class StoreActivity : AppCompatActivity() {
     private fun grantBoost() {
         lifecycleScope.launch {
             try {
+                // This will send the request and update the user object on the server
                 val updatedUser = ApiClient.grantBoost()
                 user = updatedUser
-                updateUI()
+                updateUI() // Update local UI after server success
                 Toast.makeText(this@StoreActivity, "🚀 20x Boost Activated! 🚀", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
                 Toast.makeText(this@StoreActivity, "Reward failed: ${e.message}", Toast.LENGTH_LONG).show()
@@ -213,9 +243,10 @@ class StoreActivity : AppCompatActivity() {
     private fun grantRangeBoost() {
         lifecycleScope.launch {
             try {
+                // This will send the request and update the user object on the server
                 val updatedUser = ApiClient.grantRangeBoost()
                 user = updatedUser
-                updateUI()
+                updateUI() // Update local UI after server success
                 Toast.makeText(this@StoreActivity, "🛰️ Range Boost Activated! 🛰️", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
                 Toast.makeText(this@StoreActivity, "Reward failed: ${e.message}", Toast.LENGTH_LONG).show()

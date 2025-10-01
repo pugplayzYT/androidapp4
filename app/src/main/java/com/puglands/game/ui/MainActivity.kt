@@ -18,6 +18,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.puglands.game.R
 import com.puglands.game.api.ApiClient
 import com.puglands.game.data.database.AuthUser
@@ -25,13 +27,15 @@ import com.puglands.game.data.database.Land
 import com.puglands.game.data.database.User
 import com.puglands.game.databinding.ActivityMainBinding
 import com.puglands.game.utils.GridUtils
+import io.socket.client.IO
+import io.socket.client.Socket
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
@@ -63,11 +67,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var maplibreMap: MapLibreMap
-
     private var mediaPlayer: MediaPlayer? = null
     private var secretTapCounter = 0
     private var lastTapTime: Long = 0
 
+    // StateFlows to hold and observe game state
     private val _userState = MutableStateFlow<User?>(null)
     val userState: StateFlow<User?> = _userState.asStateFlow()
     private val _allLands = MutableStateFlow<List<Land>>(emptyList())
@@ -76,7 +80,10 @@ class MainActivity : AppCompatActivity() {
     private var playerLocation: LatLng? = null
     private var incomeBoostTimerJob: Job? = null
     private var rangeBoostTimerJob: Job? = null
-    private var gameStatePollingJob: Job? = null
+
+    // Socket.IO instance for real-time communication
+    private var socket: Socket? = null
+    private val gson = Gson()
 
     private val locationRequest = LocationEngineRequest.Builder(1000L)
         .setPriority(LocationEngineRequest.PRIORITY_HIGH_ACCURACY).build()
@@ -97,6 +104,115 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // --- Core Activity Lifecycle & Setup ---
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        if (!checkAndRestoreSession()) {
+            startActivity(Intent(this, AuthActivity::class.java))
+            finish()
+            return
+        }
+        MapLibre.getInstance(this)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        binding.mapView.onCreate(savedInstanceState)
+
+        setupBackgroundMusic()
+        setupClickListeners()
+
+        // NEW: Initialize and connect to the Socket.IO server
+        setupSocket()
+
+        binding.mapView.getMapAsync { map ->
+            maplibreMap = map
+            setupMap()
+        }
+
+        // MODIFIED: Load initial data via HTTP, then rely on sockets for updates
+        loadInitialGameData()
+        observeGameStateUI()
+    }
+
+    private fun setupSocket() {
+        try {
+            // This URL must match your server's address exactly
+            val opts = IO.Options().apply {
+                forceNew = true // Helps in re-establishing connection
+            }
+            socket = IO.socket("https://increasing-scholar-shapes-newport.trycloudflare.com", opts)
+
+            // Register event listeners for real-time updates
+            socket?.on(Socket.EVENT_CONNECT) {
+                runOnUiThread { Toast.makeText(this, "Real-time connection established!", Toast.LENGTH_SHORT).show() }
+                // Once connected, subscribe to updates for this user
+                ApiClient.currentAuthUser?.uid?.let { uid ->
+                    val data = JSONObject().apply { put("uid", uid) }
+                    socket?.emit("subscribe_to_updates", data)
+                }
+            }
+
+            socket?.on("user_update") { args ->
+                val userJson = args[0].toString()
+                val user = gson.fromJson(userJson, User::class.java)
+                // Update the state, which will automatically update the UI via collectors
+                _userState.value = user
+            }
+
+            socket?.on("lands_update") { args ->
+                val landsJson = args[0].toString()
+                val landListType = object : TypeToken<List<Land>>() {}.type
+                val lands = gson.fromJson<List<Land>>(landsJson, landListType)
+                // Update the state for all lands
+                _allLands.value = lands
+            }
+
+            socket?.on(Socket.EVENT_DISCONNECT) {
+                runOnUiThread { Toast.makeText(this, "Disconnected from server.", Toast.LENGTH_SHORT).show() }
+            }
+
+            socket?.connect()
+
+        } catch (e: Exception) {
+            e.printStackTrace()
+            runOnUiThread { Toast.makeText(this, "Failed to connect to the real-time server.", Toast.LENGTH_LONG).show() }
+        }
+    }
+
+    // REPLACES the old polling function `loadInitialGameDataAndStartPolling`
+    private fun loadInitialGameData() {
+        val uid = ApiClient.currentAuthUser?.uid ?: return
+        lifecycleScope.launch {
+            try {
+                // Fetch the very first state via a standard HTTP request
+                val user = ApiClient.getUser(uid)
+                _userState.value = user
+                val lands = ApiClient.getAllLands()
+                _allLands.value = lands
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Failed to load initial data: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // NEW: Disconnect the socket and clean up listeners to prevent memory leaks
+        socket?.disconnect()
+        socket?.off() // Removes all listeners
+
+        if (::binding.isInitialized) {
+            binding.mapView.onDestroy()
+        }
+        mediaPlayer?.release()
+        mediaPlayer = null
+    }
+
+    // --- Unchanged Functions Below ---
+    // The rest of your MainActivity.kt functions remain the same. They will continue to
+    // make standard HTTP requests. The server is now responsible for sending back the
+    // response and also emitting a socket event to all connected clients.
+
     companion object {
         private const val STARTING_BALANCE = 50.0
         private const val BASE_PLAYER_RANGE_METERS = 400.0
@@ -114,11 +230,9 @@ class MainActivity : AppCompatActivity() {
         private const val IS_CURRENT_PLAYER_PROPERTY_KEY = "is_current_player"
         private const val PREFS_NAME = "PuglandsPrefs"
 
-        // Helper to convert ISO String to Date
         fun isoDateToDate(isoString: String?): Date? {
             if (isoString == null) return null
             return try {
-                // Handle ISO 8601 format including milliseconds and timezone
                 SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSSSSZZZZZ", Locale.US).parse(isoString.replace("Z", "+00:00"))
             } catch (e: ParseException) {
                 null
@@ -132,36 +246,10 @@ class MainActivity : AppCompatActivity() {
         val name = prefs.getString(AuthActivity.KEY_USER_NAME, null)
 
         if (uid != null && name != null) {
-            // Restore session state in the ApiClient
             ApiClient.currentAuthUser = AuthUser(uid, name)
             return true
         }
         return false
-    }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        if (!checkAndRestoreSession()) {
-            startActivity(Intent(this, AuthActivity::class.java))
-            finish()
-            return
-        }
-        MapLibre.getInstance(this)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        binding.mapView.onCreate(savedInstanceState)
-        setupBackgroundMusic()
-        setupClickListeners()
-        binding.mapView.getMapAsync { map ->
-            maplibreMap = map
-            setupMap()
-        }
-        lifecycleScope.launch {
-            loadInitialGameDataAndStartPolling()
-            observeGameStateUI()
-            // The line below was the cause of the error and has been removed:
-            // launchOnlineIncomeLoop()
-        }
     }
 
     private fun setupClickListeners() {
@@ -224,8 +312,7 @@ class MainActivity : AppCompatActivity() {
     private fun processRedemptionRequest(amount: Double) {
         lifecycleScope.launch {
             try {
-                val updatedUser = ApiClient.submitRedemption(amount)
-                _userState.value = updatedUser
+                ApiClient.submitRedemption(amount)
                 Toast.makeText(this@MainActivity, "Redemption request sent! Pug will review it.", Toast.LENGTH_LONG).show()
 
             } catch (e: Exception) {
@@ -253,8 +340,7 @@ class MainActivity : AppCompatActivity() {
     private fun grantPugbucks(amount: Double) {
         lifecycleScope.launch {
             try {
-                val updatedUser = ApiClient.grantPugbucks(amount)
-                _userState.value = updatedUser
+                ApiClient.grantPugbucks(amount)
                 Toast.makeText(this@MainActivity, "Granted $amount Pugbucks!", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Toast.makeText(this@MainActivity, "Error: ${e.message}", Toast.LENGTH_LONG).show()
@@ -268,49 +354,11 @@ class MainActivity : AppCompatActivity() {
         mediaPlayer?.setVolume(0.4f, 0.4f)
     }
 
-    private suspend fun refreshAllData() {
-        val uid = ApiClient.currentAuthUser?.uid ?: return
-        try {
-            val user = ApiClient.getUser(uid)
-            _userState.value = user
-            val lands = ApiClient.getAllLands()
-            _allLands.value = lands
-            if(::maplibreMap.isInitialized && maplibreMap.style?.isFullyLoaded == true) {
-                updateAllLandsLayer()
-            }
-        } catch (e: Exception) {
-            Toast.makeText(this, "Error refreshing data: ${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    private fun loadInitialGameDataAndStartPolling() {
-        val uid = ApiClient.currentAuthUser?.uid ?: return
-        gameStatePollingJob?.cancel()
-        gameStatePollingJob = lifecycleScope.launch {
-            while (true) {
-                try {
-                    // BUG FIX: The client now ONLY fetches data. The server handles all calculations.
-                    val user = ApiClient.getUser(uid)
-                    _userState.value = user
-
-                    val lands = ApiClient.getAllLands()
-                    _allLands.value = lands
-
-                    if (::maplibreMap.isInitialized && maplibreMap.style?.isFullyLoaded == true) {
-                        updateAllLandsLayer()
-                    }
-                } catch (e: Exception) {
-                    // Handle polling error silently in the background
-                }
-                delay(5000) // Poll every 5 seconds
-            }
-        }
-    }
-
     private fun forceRefreshUserData() {
         val uid = ApiClient.currentAuthUser?.uid ?: return
         lifecycleScope.launch {
             try {
+                // This call ensures we get the latest calculated state from the server on resume
                 val user = ApiClient.getUser(uid)
                 _userState.value = user
             } catch (e: Exception) {
@@ -318,8 +366,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
-
-
 
     private fun getCurrentRangeMeters(): Double {
         val rangeBoostEndTime = isoDateToDate(_userState.value?.rangeBoostEndTime)
@@ -379,18 +425,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun formatDuration(totalSeconds: Long): String {
-        if (totalSeconds <= 0) return "a moment"
-        val hours = totalSeconds / 3600
-        val minutes = (totalSeconds % 3600) / 60
-        val seconds = totalSeconds % 60
-        return when {
-            hours > 0 -> "${hours}h ${minutes}m ${seconds}s"
-            minutes > 0 -> "${minutes}m ${seconds}s"
-            else -> "${seconds}s"
-        }
-    }
-
     private fun observeGameStateUI() {
         lifecycleScope.launch {
             userState.collect { user ->
@@ -442,12 +476,8 @@ class MainActivity : AppCompatActivity() {
     private fun acquireLand(gx: Int, gy: Int, method: String) {
         lifecycleScope.launch {
             try {
-                val updatedUser = ApiClient.acquireLand(gx, gy, method)
-                _userState.value = updatedUser
-                val lands = ApiClient.getAllLands()
-                _allLands.value = lands
-
-                Toast.makeText(this@MainActivity, "Land acquired via $method!", Toast.LENGTH_SHORT).show()
+                ApiClient.acquireLand(gx, gy, method)
+                Toast.makeText(this@MainActivity, "Land acquisition request sent!", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Toast.makeText(this@MainActivity, "Acquisition failed: ${e.message}", Toast.LENGTH_SHORT).show()
             }
@@ -484,15 +514,13 @@ class MainActivity : AppCompatActivity() {
     private fun exchangePugCoins(amount: Double) {
         lifecycleScope.launch {
             try {
-                val updatedUser = ApiClient.exchangePugCoins(amount)
-                _userState.value = updatedUser
-                Toast.makeText(this@MainActivity, "Exchanged $amount Pug Coins for ${amount * 150} Pugbucks!", Toast.LENGTH_LONG).show()
+                ApiClient.exchangePugCoins(amount)
+                Toast.makeText(this@MainActivity, "Exchange successful!", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
                 Toast.makeText(this@MainActivity, "Exchange failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
-
 
     private fun setupMap() {
         val styleUrl = "https://demotiles.maplibre.org/style.json"
@@ -712,12 +740,7 @@ class MainActivity : AppCompatActivity() {
                     throw Exception("Could not find enough unowned land in range. Found ${nearbyUnownedPlots.size}. Move to a new area.")
                 }
 
-                val updatedUser = ApiClient.bulkClaim(nearbyUnownedPlots)
-
-                _userState.value = updatedUser
-
-                val lands = ApiClient.getAllLands()
-                _allLands.value = lands
+                ApiClient.bulkClaim(nearbyUnownedPlots)
 
                 progressDialog.dismiss()
                 Toast.makeText(this@MainActivity, "Successfully claimed $amountToClaim new plots nearby!", Toast.LENGTH_LONG).show()
@@ -765,18 +788,6 @@ class MainActivity : AppCompatActivity() {
         return Polygon.fromLngLats(listOf(points))
     }
 
-    private fun saveUserProgress() {
-        val user = _userState.value ?: return
-
-        lifecycleScope.launch {
-            try {
-                ApiClient.updateUser(mapOf("balance" to user.balance, "pug_coins" to user.pugCoins))
-            } catch (e: Exception) {
-                // Handle failure to save data
-            }
-        }
-    }
-
     override fun onStart() {
         super.onStart()
         binding.mapView.onStart()
@@ -803,14 +814,11 @@ class MainActivity : AppCompatActivity() {
         mediaPlayer?.pause()
     }
 
-    // BUG FIX: The onStop method no longer needs to save progress, as the server does it automatically.
     override fun onStop() {
         super.onStop()
         binding.mapView.onStop()
         incomeBoostTimerJob?.cancel()
         rangeBoostTimerJob?.cancel()
-        gameStatePollingJob?.cancel() // Stop polling when the app is backgrounded
-        // No longer need to call saveUserProgress()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -823,14 +831,5 @@ class MainActivity : AppCompatActivity() {
     override fun onLowMemory() {
         super.onLowMemory()
         binding.mapView.onLowMemory()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        if (::binding.isInitialized) {
-            binding.mapView.onDestroy()
-        }
-        mediaPlayer?.release()
-        mediaPlayer = null
     }
 }
