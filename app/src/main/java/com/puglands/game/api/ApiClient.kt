@@ -19,7 +19,7 @@ import java.net.URL
  * Uses HttpURLConnection and Gson for network calls on a separate coroutine dispatcher.
  */
 object ApiClient {
-    private const val BASE_URL = "https://increasing-scholar-shapes-newport.trycloudflare.com"
+    private const val BASE_URL = "https://package-exists-pubs-flowers.trycloudflare.com"
 
     // Stores the authenticated user's ID and name for subsequent API calls
     var currentAuthUser: AuthUser? = null

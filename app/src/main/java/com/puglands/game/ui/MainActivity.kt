@@ -263,7 +263,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.uiCard.setOnClickListener { handleSecretTap() }
         binding.redeemButton.setOnClickListener { showRedeemDialog() }
-        binding.bulkClaimButton.setOnClickListener { showBulkClaimDialog() }
+        // Bulk claim button listener has been removed
         binding.exchangeButton.setOnClickListener { showExchangeDialog() }
     }
 
@@ -779,6 +779,18 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             try {
+                // 🔥 FIRE FIX: Check and restore the session as a last-ditch effort before making API call.
+                if (ApiClient.currentAuthUser == null) {
+                    // This calls your existing function (checkAndRestoreSession) to re-read the session from SharedPreferences
+                    checkAndRestoreSession()
+
+                    if (ApiClient.currentAuthUser == null) {
+                        // If it's still null, throw a clear error instead of letting the ApiClient crash with IllegalStateException.
+                        progressDialog.dismiss()
+                        throw IllegalStateException("Session Invalid: Cannot find authenticated user ID to send Bulk Claim request. Please restart the app and log in.")
+                    }
+                }
+
                 val ownedLandCoords = _allLands.value.map { it.gx to it.gy }.toSet()
                 val nearbyUnownedPlots = mutableListOf<Map<String, Int>>()
                 val (centerGx, centerGy) = GridUtils.latLonToGrid(centerLocation)
@@ -789,12 +801,14 @@ class MainActivity : AppCompatActivity() {
                 while (nearbyUnownedPlots.size < amountToClaim && searchRadius < 50) {
                     for (dx in -searchRadius..searchRadius) {
                         for (dy in -searchRadius..searchRadius) {
+                            // This skips the inner area when searching in expanding circles
                             if (abs(dx) < searchRadius && abs(dy) < searchRadius) continue
 
                             val gx = centerGx + dx
                             val gy = centerGy + dy
                             val plotCoords = gx to gy
 
+                            // Skip if already owned or already added to the list
                             if (ownedLandCoords.contains(plotCoords) || nearbyUnownedPlots.any { it["gx"] == gx && it["gy"] == gy }) {
                                 continue
                             }
@@ -814,6 +828,7 @@ class MainActivity : AppCompatActivity() {
                     throw Exception("Could not find enough unowned land in range. Found ${nearbyUnownedPlots.size}. Move to a new area.")
                 }
 
+                // API call for bulk claiming
                 ApiClient.bulkClaim(nearbyUnownedPlots)
 
                 progressDialog.dismiss()

@@ -106,35 +106,17 @@
                     android:text="Store" />
             </LinearLayout>
 
-            <LinearLayout
-                android:id="@+id/button_layout_bottom_row"
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/redeemButton"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
                 android:layout_marginTop="8dp"
+                android:text="Redeem"
+                app:strokeColor="?attr/colorPrimary"
                 app:layout_constraintTop_toBottomOf="@id/button_layout_top_row"
                 app:layout_constraintStart_toStartOf="parent"
-                app:layout_constraintEnd_toEndOf="parent"
-                app:layout_constraintBottom_toBottomOf="parent">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/bulkClaimButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Bulk Claim"
-                    android:layout_marginEnd="8dp"/>
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/redeemButton"
-                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Redeem"
-                    app:strokeColor="?attr/colorPrimary" />
-
-            </LinearLayout>
+                app:layout_constraintEnd_toEndOf="parent"/>
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/exchangeButton"
@@ -142,9 +124,10 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:text="Exchange Coins"
-                app:layout_constraintTop_toBottomOf="@id/button_layout_bottom_row"
+                app:layout_constraintTop_toBottomOf="@id/redeemButton"
                 app:layout_constraintStart_toStartOf="parent"
-                app:layout_constraintEnd_toEndOf="parent"/>
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintBottom_toBottomOf="parent"/>
 
         </androidx.constraintlayout.widget.ConstraintLayout>
 
