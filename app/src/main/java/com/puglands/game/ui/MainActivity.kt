@@ -142,7 +142,7 @@ class MainActivity : AppCompatActivity() {
             val opts = IO.Options().apply {
                 forceNew = true // Helps in re-establishing connection
             }
-            socket = IO.socket("https://increasing-scholar-shapes-newport.trycloudflare.com", opts)
+            socket = IO.socket("https://package-exists-pubs-flowers.trycloudflare.com", opts)
 
             // Register event listeners for real-time updates
             socket?.on(Socket.EVENT_CONNECT) {
@@ -155,18 +155,23 @@ class MainActivity : AppCompatActivity() {
             }
 
             socket?.on("user_update") { args ->
-                val userJson = args[0].toString()
-                val user = gson.fromJson(userJson, User::class.java)
-                // Update the state, which will automatically update the UI via collectors
-                _userState.value = user
+                // THIS IS THE FIX -> Wrap the logic in runOnUiThread
+                runOnUiThread {
+                    val userJson = args[0].toString()
+                    val user = gson.fromJson(userJson, User::class.java)
+                    // Update the state, which will automatically update the UI via collectors
+                    _userState.value = user
+                }
             }
 
             socket?.on("lands_update") { args ->
                 val landsJson = args[0].toString()
                 val landListType = object : TypeToken<List<Land>>() {}.type
                 val lands = gson.fromJson<List<Land>>(landsJson, landListType)
-                // Update the state for all lands
-                _allLands.value = lands
+                // Update the state for all lands. This should also run on the UI thread for safety.
+                runOnUiThread {
+                    _allLands.value = lands
+                }
             }
 
             socket?.on(Socket.EVENT_DISCONNECT) {
