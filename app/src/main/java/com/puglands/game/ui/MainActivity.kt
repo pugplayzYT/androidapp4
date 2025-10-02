@@ -602,7 +602,9 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun setupMap() {
-        val styleUrl = "https://demotiles.maplibre.org/style.json"
+        // This is a free style from CartoDB that should have the details you want.
+        val styleUrl = "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
+
         maplibreMap.setStyle(Style.Builder().fromUri(styleUrl)) { style ->
             addMapLayers(style)
             checkLocationPermissionAndEnableLocation(style)
